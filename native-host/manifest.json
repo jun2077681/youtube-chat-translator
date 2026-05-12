@@ -1,0 +1,9 @@
+﻿{
+    "name": "com.ylct.translator",
+    "description": "YouTube Live Chat Translator native host (claude -p bridge)",
+    "path": "REPLACED_BY_install.ps1",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://REPLACED_BY_install.ps1/"
+    ]
+}

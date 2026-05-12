@@ -1,0 +1,14 @@
+{
+  "name": "ylct-native-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Messaging Host for YouTube Live Chat Translator. Bridges Chrome extension to Claude Code CLI.",
+  "main": "host.js",
+  "scripts": {
+    "start": "node host.js",
+    "test:smoke": "node test-smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

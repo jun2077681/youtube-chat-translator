@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>YLCT icon builder</title>
+  <style>
+    body { font-family: system-ui, sans-serif; padding: 24px; max-width: 720px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p { color: #555; font-size: 13px; margin: 4px 0 16px; }
+    button { padding: 10px 18px; font-size: 14px; cursor: pointer;
+             background: #5A2D82; color: #fff; border: none; border-radius: 6px; }
+    button:hover { background: #432063; }
+    #preview { display: flex; gap: 24px; align-items: end; margin-top: 24px;
+               padding: 16px; background: #f5f5f7; border-radius: 8px; }
+    #preview .row { text-align: center; }
+    #preview canvas { background:
+      repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 16px 16px;
+      border: 1px solid #ccc; }
+    #preview label { display: block; margin-top: 6px; font-size: 11px; color: #777; }
+    .note { color: #888; font-size: 12px; line-height: 1.5; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>YLCT icon builder</h1>
+  <p>버튼을 누르면 <code>icon-16.png</code>, <code>icon-32.png</code>, <code>icon-48.png</code>, <code>icon-128.png</code> 4개 파일이 다운로드됩니다. 저장한 PNG를 이 폴더(<code>extension/icons/</code>)로 옮겨주세요.</p>
+
+  <button id="run">Generate &amp; Download 4 PNGs</button>
+
+  <div id="preview"></div>
+
+  <p class="note">디자인을 바꾸려면 <code>source.svg</code>를 편집한 뒤 아래 <code>&lt;svg id="src"&gt;</code> 블록의 내용도 동일하게 갱신하세요. (인라인 SVG는 file:// 환경에서 fetch CORS를 피하기 위함입니다.)</p>
+
+  <!-- inline source — keep in sync with source.svg -->
+  <svg id="src" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" shape-rendering="geometricPrecision" style="display:none">
+    <defs>
+      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#FFE0E9"/>
+        <stop offset="1" stop-color="#D7C4F0"/>
+      </linearGradient>
+      <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="2"/>
+        <feOffset dy="2"/>
+        <feComponentTransfer><feFuncA type="linear" slope="0.18"/></feComponentTransfer>
+        <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+    <circle cx="20" cy="20" r="6.5" fill="#FF3D60"/>
+    <circle cx="20" cy="20" r="2.2" fill="#fff" opacity="0.65"/>
+    <g filter="url(#sh)">
+      <rect x="14" y="38" width="100" height="72" rx="20" fill="#FFFFFF" fill-opacity="0.94"/>
+      <path d="M 32 108 L 26 122 L 48 108 Z" fill="#FFFFFF" fill-opacity="0.94"/>
+    </g>
+    <text x="44" y="92"
+      font-family="'Yu Gothic UI','Noto Sans JP','Hiragino Kaku Gothic ProN',sans-serif"
+      font-size="48" font-weight="700" text-anchor="middle"
+      fill="#5A2D82">あ</text>
+    <text x="84" y="92"
+      font-family="'Noto Sans KR','Malgun Gothic',sans-serif"
+      font-size="48" font-weight="700" text-anchor="middle"
+      fill="#C73E91">가</text>
+    <line x1="64" y1="54" x2="64" y2="100" stroke="#5A2D82" stroke-width="1.4" opacity="0.30"/>
+  </svg>
+
+  <script>
+    const SIZES = [16, 32, 48, 128];
+
+    function svgToImage() {
+      const svg = document.getElementById("src");
+      const clone = svg.cloneNode(true);
+      clone.removeAttribute("style");
+      clone.setAttribute("width", "128");
+      clone.setAttribute("height", "128");
+      const xml = new XMLSerializer().serializeToString(clone);
+      const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+        img.src = url;
+      });
+    }
+
+    function render(img, size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, 0, 0, size, size);
+      return canvas;
+    }
+
+    function download(canvas, filename) {
+      return new Promise((resolve) => {
+        canvas.toBlob((blob) => {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            URL.revokeObjectURL(a.href);
+            a.remove();
+            resolve();
+          }, 100);
+        }, "image/png");
+      });
+    }
+
+    async function buildAll() {
+      const preview = document.getElementById("preview");
+      preview.innerHTML = "";
+      const img = await svgToImage();
+      for (const size of SIZES) {
+        const canvas = render(img, size);
+        const row = document.createElement("div");
+        row.className = "row";
+        row.appendChild(canvas);
+        const label = document.createElement("label");
+        label.textContent = `${size}×${size}`;
+        row.appendChild(label);
+        preview.appendChild(row);
+        await download(canvas, `icon-${size}.png`);
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+
+    document.getElementById("run").addEventListener("click", () => {
+      buildAll().catch((e) => alert("Failed: " + (e && e.message || e)));
+    });
+  </script>
+</body>
+</html>
