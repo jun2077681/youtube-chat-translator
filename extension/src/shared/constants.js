@@ -17,7 +17,8 @@
   });
 
   const KEY = Object.freeze({
-    WHITELIST: "ylct:whitelist:v1",
+    // v2: keyed by @handle instead of channelId.
+    WHITELIST: "ylct:whitelist:v2",
     SETTINGS: "ylct:settings:v1",
     CACHE: "ylct:cache:v1",
   });
@@ -27,27 +28,50 @@
     maxTurns: 200,
   });
 
-  const CHANNEL_ID_SELECTORS = Object.freeze([
-    'meta[itemprop="channelId"]',
-    'meta[itemprop="identifier"]',
-  ]);
-
   const CHANNEL_NAME_SOURCES = Object.freeze([
-    { sel: 'span[itemprop="author"] link[itemprop="name"]', attr: "content" },
+    { sel: "ytd-channel-name yt-formatted-string a", attr: null },
     { sel: "ytd-channel-name yt-formatted-string", attr: null },
     { sel: "#owner #channel-name yt-formatted-string", attr: null },
   ]);
 
+  // Areas that host the viewer's own /@me links (NOT the watched streamer).
+  const HANDLE_EXCLUDE_HOSTS = Object.freeze([
+    "ytd-masthead",
+    "tp-yt-iron-dropdown",
+    "ytd-popup-container",
+    "ytd-account-section-list-renderer",
+    "ytd-mini-guide-renderer",
+    "ytd-guide-renderer",
+  ]);
+
+  function hasLiveChatFrame(doc) {
+    return !!doc.querySelector("ytd-live-chat-frame");
+  }
+
+  // Gating on the chat frame keeps non-watch surfaces (home, search,
+  // channel pages) from resolving to whichever /@handle they happen to
+  // render first.
   function readChannelInfoFromDocument(doc) {
     try {
       if (!doc) return null;
+      if (!hasLiveChatFrame(doc)) return null;
 
-      let channelId = null;
-      for (const sel of CHANNEL_ID_SELECTORS) {
-        const el = doc.querySelector(sel);
-        if (el && el.content) { channelId = el.content; break; }
+      // The watched video's owner section renders before the recommendations
+      // in DOM order, so the first body-level /@handle anchor outside the
+      // viewer's masthead/guide/popups is reliably the streamer.
+      const anchors = doc.querySelectorAll('a[href^="/@"]');
+      let handle = null;
+      for (const a of anchors) {
+        let inExcluded = false;
+        for (const host of HANDLE_EXCLUDE_HOSTS) {
+          if (a.closest && a.closest(host)) { inExcluded = true; break; }
+        }
+        if (inExcluded) continue;
+        const href = a.getAttribute("href") || "";
+        const m = href.match(/^\/(@[^/?#]+)/);
+        if (m) { handle = m[1]; break; }
       }
-      if (!channelId) return null;
+      if (!handle) return null;
 
       let channelName = null;
       for (const { sel, attr } of CHANNEL_NAME_SOURCES) {
@@ -56,7 +80,7 @@
         const v = attr ? el.getAttribute(attr) : el.textContent;
         if (v && v.trim()) { channelName = v.trim(); break; }
       }
-      return { channelId, channelName };
+      return { handle, channelName };
     } catch (_) {
       return null;
     }

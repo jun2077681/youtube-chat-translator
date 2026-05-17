@@ -3,7 +3,7 @@
   "name": "YouTube Live Chat Translator",
   "version": "0.9.0",
   "description": "Translates YouTube live-chat between Japanese and Korean via the Claude Code CLI. Per-channel whitelist; no API key required.",
-  "permissions": ["nativeMessaging", "storage"],
+  "permissions": ["nativeMessaging", "storage", "activeTab", "scripting"],
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

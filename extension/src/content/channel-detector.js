@@ -13,7 +13,7 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === MSG.GET_CHANNEL_INFO) {
       const info = readChannelInfoFromDocument(document);
-      sendResponse(info || { channelId: null, channelName: null });
+      sendResponse(info || { handle: null, channelName: null });
       return false;
     }
     return false;
