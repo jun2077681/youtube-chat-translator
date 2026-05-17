@@ -121,6 +121,17 @@
       );
   }
 
+  // Collapse runs of the same char (3+) down to one. Stylistic emphasis
+  // like "ありがとうううう" should share a cache slot with "ありがとう".
+  function collapseRepeats(text) {
+    return (text || "").replace(/(.)\1{2,}/gu, "$1");
+  }
+
+  // Cache key used for storage lookups and in-flight dedup.
+  function cacheKey(text) {
+    return collapseRepeats(normalize(text));
+  }
+
   // LRU using insertion-order Map.
   const cache = new Map();
 
@@ -371,9 +382,9 @@
     pendingMap.delete(id);
     stats.pending = Math.max(0, stats.pending - 1);
 
-    // Cache the result keyed by normalized source text.
+    // Cache the result keyed by normalized + repeat-collapsed source text.
     if (entry && entry.ja && typeof ko === "string") {
-      cachePut(normalize(entry.ja), ko);
+      cachePut(cacheKey(entry.ja), ko);
     }
 
     if (!el) return;
@@ -424,7 +435,7 @@
 
     // Cache lookup BEFORE placeholder + visibility check.
     // Cached translations are free, so always apply even when hidden.
-    const key = normalize(text);
+    const key = cacheKey(text);
     const cached = cacheGet(key);
     if (cached != null) {
       stats.cacheHits += 1;
