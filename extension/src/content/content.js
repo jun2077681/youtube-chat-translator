@@ -205,8 +205,19 @@
     seen: 0, japanese: 0, korean: 0, noise: 0, skip: 0,
     pending: 0, done: 0, error: 0,
     cacheHits: 0, hidden: 0, self: 0,
+    dedupHits: 0,
   };
-  window.__ylctStats = () => ({ ...stats, cacheSize: cache.size });
+  window.__ylctStats = () => ({
+    ...stats,
+    cacheSize: cache.size,
+    inflightKeys: inflightByKey.size,
+    queueLen: queue.length,
+  });
+
+  // In-flight dedup: cacheKey -> Set<placeholderId>. Multiple chat
+  // messages with the same normalized text piggy-back on the first
+  // translation request; the response fans out to every sibling.
+  const inflightByKey = new Map();
 
   window.__ylctDebug = () => {
     const scroller = getChatScroller();
@@ -233,9 +244,9 @@
     flushTimer = setTimeout(flushBatch, batchWindowMs);
   }
 
-  function enqueue(node, id, ja) {
+  function enqueue(node, id, ja, key) {
     queue.push({ id, ja, node });
-    pendingMap.set(id, { node, ja });
+    pendingMap.set(id, { node, ja, key });
     stats.pending += 1;
 
     if (queue.length >= MAX_BATCH_SIZE) {
@@ -243,6 +254,20 @@
     } else {
       scheduleFlush();
     }
+  }
+
+  // For a primary id (one we actually sent), return all ids that share
+  // the same inflight bucket and clear the bucket so subsequent callers
+  // see no entry. Falls back to [id] for non-deduped messages.
+  function consumeSiblings(id) {
+    const entry = pendingMap.get(id);
+    const key = entry && entry.key;
+    if (key && inflightByKey.has(key)) {
+      const ids = Array.from(inflightByKey.get(key));
+      inflightByKey.delete(key);
+      return ids;
+    }
+    return [id];
   }
 
   function flushBatch() {
@@ -255,12 +280,18 @@
     const items = batch.map((b) => ({ id: b.id, ja: b.ja }));
     console.log(`[ylct] flushing batch: ${items.length} item(s)`);
 
+    const failBatch = (reason) => {
+      batch.forEach((b) => {
+        for (const sid of consumeSiblings(b.id)) markError(sid, reason);
+      });
+    };
+
     // Detect "extension context invalidated" up front: chrome.runtime is gone
     // when the user reloads the extension while this page is still open.
     if (!chrome.runtime || !chrome.runtime.id) {
       const reason = "extension reloaded — refresh the page";
       console.warn("[ylct] " + reason);
-      batch.forEach((b) => markError(b.id, reason));
+      failBatch(reason);
       return;
     }
 
@@ -269,7 +300,7 @@
         if (chrome.runtime.lastError) {
           const msg = chrome.runtime.lastError.message;
           console.warn("[ylct] sendMessage error:", msg);
-          batch.forEach((b) => markError(b.id, msg));
+          failBatch(msg);
           return;
         }
         handleBatchResponse(batch, response);
@@ -278,7 +309,7 @@
       // Throws synchronously when the runtime port is gone.
       const msg = (err && err.message) || String(err);
       console.warn("[ylct] sendMessage threw:", msg);
-      batch.forEach((b) => markError(b.id, msg));
+      failBatch(msg);
     }
   }
 
@@ -286,21 +317,34 @@
     if (!response || !response.ok) {
       const err = (response && (response.error || response.raw)) || "unknown error";
       console.warn("[ylct] translate failed:", err);
-      batch.forEach((b) => markError(b.id, err));
+      batch.forEach((b) => {
+        for (const sid of consumeSiblings(b.id)) markError(sid, err);
+      });
       return;
     }
 
     const translated = new Set();
+    let dedupFanout = 0;
     for (const r of response.translations) {
-      applyTranslation(r.id, r.ko);
-      translated.add(r.id);
+      const siblings = consumeSiblings(r.id);
+      if (siblings.length > 1) dedupFanout += siblings.length - 1;
+      for (const sid of siblings) {
+        applyTranslation(sid, r.ko);
+        translated.add(sid);
+      }
     }
     batch.forEach((b) => {
-      if (!translated.has(b.id)) markError(b.id, "no translation in response");
+      if (translated.has(b.id)) return;
+      for (const sid of consumeSiblings(b.id)) {
+        if (!translated.has(sid)) markError(sid, "no translation in response");
+      }
     });
 
     if (response.elapsedMs != null) {
-      console.log(`[ylct] batch done in ${response.elapsedMs}ms (${translated.size}/${batch.length})`);
+      console.log(
+        `[ylct] batch done in ${response.elapsedMs}ms ` +
+        `(${translated.size}/${batch.length + dedupFanout}, dedup=${dedupFanout})`
+      );
     }
   }
 
@@ -397,7 +441,7 @@
 
     // Cache the result keyed by normalized + repeat-collapsed source text.
     if (entry && entry.ja && typeof ko === "string") {
-      cachePut(cacheKey(entry.ja), ko);
+      cachePut(entry.key || cacheKey(entry.ja), ko);
     }
 
     if (!el) return;
@@ -461,6 +505,16 @@
       return;
     }
 
+    // Piggy-back on an in-flight translation for the same key.
+    if (inflightByKey.has(key)) {
+      if (!injectPlaceholder(node, id)) return;
+      inflightByKey.get(key).add(id);
+      pendingMap.set(id, { node, ja: text, key });
+      stats.pending += 1;
+      stats.dedupHits += 1;
+      return;
+    }
+
     // Skip un-cached translation when the iframe is not visible
     // to conserve Max usage.
     if (document.hidden) {
@@ -469,7 +523,8 @@
     }
 
     if (!injectPlaceholder(node, id)) return;
-    enqueue(node, id, text);
+    inflightByKey.set(key, new Set([id]));
+    enqueue(node, id, text, key);
   }
 
   // YouTube re-renders the chat list when the user switches between
