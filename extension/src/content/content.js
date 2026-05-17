@@ -205,7 +205,7 @@
     seen: 0, japanese: 0, korean: 0, noise: 0, skip: 0,
     pending: 0, done: 0, error: 0,
     cacheHits: 0, hidden: 0, self: 0,
-    dedupHits: 0,
+    dedupHits: 0, sampled: 0,
   };
   window.__ylctStats = () => ({
     ...stats,
@@ -218,6 +218,23 @@
   // messages with the same normalized text piggy-back on the first
   // translation request; the response fans out to every sibling.
   const inflightByKey = new Map();
+
+  // Adaptive sampling: under heavy backlog (replay backfill etc.) drop a
+  // fraction of newly arriving un-cached, non-deduped messages so the
+  // queue can drain without ballooning Max-plan usage.
+  const SAMPLING_SOFT = 40;   // queue+pending above this -> drop 50%
+  const SAMPLING_HARD = 80;   // above this -> drop 75%
+
+  function currentLoad() {
+    return queue.length + pendingMap.size;
+  }
+
+  function shouldDrop() {
+    const load = currentLoad();
+    if (load >= SAMPLING_HARD) return Math.random() < 0.75;
+    if (load >= SAMPLING_SOFT) return Math.random() < 0.5;
+    return false;
+  }
 
   window.__ylctDebug = () => {
     const scroller = getChatScroller();
@@ -519,6 +536,12 @@
     // to conserve Max usage.
     if (document.hidden) {
       stats.hidden += 1;
+      return;
+    }
+
+    // Backlog sampling runs AFTER cache + dedup so free paths stay unaffected.
+    if (shouldDrop()) {
+      stats.sampled += 1;
       return;
     }
 
