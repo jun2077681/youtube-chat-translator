@@ -84,6 +84,16 @@
     /^(.)\1{2,}$/u,                                   // bare single-char run
   ];
 
+  // Reject pictogram-dominated messages even when they contain stray kana.
+  const PICTOGRAM_NOISE_RATIO = 0.7;
+  const PICTOGRAM_RE = /[\p{Extended_Pictographic}\s]/gu;
+
+  function pictogramRatio(text) {
+    if (!text) return 0;
+    const m = text.match(PICTOGRAM_RE);
+    return m ? m.length / text.length : 0;
+  }
+
   function isNoise(text) {
     return NOISE_PATTERNS.some((re) => re.test(text));
   }
@@ -92,11 +102,13 @@
     const text = (rawText || "").trim();
     if (!text) return "skip";
 
-    // Cheap script checks first; isNoise is the second pass for stamps.
+    // Cheap script checks first; pictogram-ratio scan only runs if Japanese
+    // is detected (most non-JP messages skip the Unicode-property regex).
     const hangulMatches = text.match(HANGUL);
     if (hangulMatches && hangulMatches.length / text.length > 0.3) return "korean";
     const hasJa = HIRAGANA.test(text) || KATAKANA.test(text) || CJK.test(text);
 
+    if (hasJa && pictogramRatio(text) >= PICTOGRAM_NOISE_RATIO) return "noise";
     if (hasJa && isNoise(text)) return "noise";
     if (hasJa) return "japanese";
     if (isNoise(text)) return "noise";
