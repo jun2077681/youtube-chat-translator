@@ -46,14 +46,14 @@ function saveWhitelist(list) {
 }
 
 async function addCurrent() {
-  if (!detectedChannel || !detectedChannel.channelId) return;
+  if (!detectedChannel || !detectedChannel.handle) return;
   const list = await loadWhitelist();
-  if (list.some((e) => e.channelId === detectedChannel.channelId)) return;
+  if (list.some((e) => e.handle === detectedChannel.handle)) return;
   const updated = [
     ...list,
     {
-      channelId: detectedChannel.channelId,
-      channelName: detectedChannel.channelName || detectedChannel.channelId,
+      handle: detectedChannel.handle,
+      channelName: detectedChannel.channelName || detectedChannel.handle,
       addedAt: new Date().toISOString(),
     },
   ];
@@ -62,9 +62,9 @@ async function addCurrent() {
   await refreshAddButton();
 }
 
-async function removeChannel(channelId) {
+async function removeChannel(handle) {
   const list = await loadWhitelist();
-  const filtered = list.filter((e) => e.channelId !== channelId);
+  const filtered = list.filter((e) => e.handle !== handle);
   await saveWhitelist(filtered);
   await renderWhitelist();
   await refreshAddButton();
@@ -84,11 +84,11 @@ async function renderWhitelist() {
     const li = document.createElement("li");
     const name = document.createElement("span");
     name.className = "name";
-    name.textContent = entry.channelName || entry.channelId;
-    name.title = entry.channelId;
+    name.textContent = entry.channelName || entry.handle;
+    name.title = entry.handle;
     const btn = document.createElement("button");
     btn.textContent = "제거";
-    btn.addEventListener("click", () => removeChannel(entry.channelId));
+    btn.addEventListener("click", () => removeChannel(entry.handle));
     li.appendChild(name);
     li.appendChild(btn);
     whitelistList.appendChild(li);
@@ -96,13 +96,13 @@ async function renderWhitelist() {
 }
 
 async function refreshAddButton() {
-  if (!detectedChannel || !detectedChannel.channelId) {
+  if (!detectedChannel || !detectedChannel.handle) {
     addChannelBtn.disabled = true;
     addChannelBtn.textContent = "현재 채널을 감지할 수 없음";
     return;
   }
   const list = await loadWhitelist();
-  const already = list.some((e) => e.channelId === detectedChannel.channelId);
+  const already = list.some((e) => e.handle === detectedChannel.handle);
   addChannelBtn.disabled = already;
   addChannelBtn.textContent = already
     ? "이미 화이트리스트에 있음"
@@ -111,20 +111,49 @@ async function refreshAddButton() {
 
 addChannelBtn.addEventListener("click", addCurrent);
 
-async function detectCurrentChannel() {
+function sendChannelInfoMessage(tabId) {
   return new Promise((resolve) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs && tabs[0];
-      if (!tab || !tab.id) { resolve(null); return; }
-      chrome.tabs.sendMessage(tab.id, { type: MSG.GET_CHANNEL_INFO }, (reply) => {
-        if (chrome.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-        resolve(reply || null);
-      });
+    chrome.tabs.sendMessage(tabId, { type: MSG.GET_CHANNEL_INFO }, (reply) => {
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(reply || null);
     });
   });
+}
+
+// YouTube SPA navigation doesn't re-inject content scripts, so push our
+// detector into the tab on demand. Both files run in the standard isolated
+// world; channel-detector.js guards itself against double-loading.
+async function injectChannelDetector(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ["src/shared/constants.js", "src/content/channel-detector.js"],
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function detectCurrentChannel() {
+  const [tab] = await new Promise((res) =>
+    chrome.tabs.query({ active: true, currentWindow: true }, res)
+  );
+  if (!tab || !tab.id || !tab.url) return null;
+  if (!/^https:\/\/www\.youtube\.com\/watch/.test(tab.url)) return null;
+
+  let viaMessage = await sendChannelInfoMessage(tab.id);
+  if (viaMessage && viaMessage.handle) return viaMessage;
+
+  if (!(await injectChannelDetector(tab.id))) return null;
+
+  // Retries cover late DOM hydration after a fresh injection.
+  for (const ms of [0, 400, 800, 1200]) {
+    if (ms) await new Promise((r) => setTimeout(r, ms));
+    viaMessage = await sendChannelInfoMessage(tab.id);
+    if (viaMessage && viaMessage.handle) return viaMessage;
+  }
+  return null;
 }
 
 function loadSettings() {
@@ -186,9 +215,9 @@ resetSessionBtn.addEventListener("click", async () => {
 
 async function initMainTab() {
   detectedChannel = await detectCurrentChannel();
-  if (detectedChannel && detectedChannel.channelId) {
+  if (detectedChannel && detectedChannel.handle) {
     currentChannelName.textContent = detectedChannel.channelName || "(이름 없음)";
-    currentChannelId.textContent = detectedChannel.channelId;
+    currentChannelId.textContent = detectedChannel.handle;
   } else {
     currentChannelName.textContent = "YouTube 라이브 페이지가 아니거나 감지 실패";
     currentChannelId.textContent = "";

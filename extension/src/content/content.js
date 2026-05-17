@@ -44,13 +44,16 @@
     });
   }
 
-  // Whitelist is opt-in: empty means OFF, only listed channels are active.
+  // Whitelist is opt-in: empty means OFF. `parentInfoReady` is false when
+  // the /watch page hasn't rendered its owner /@handle yet so the caller
+  // can poll instead of waiting for the next whitelist mutation.
   async function shouldOperateForCurrentChannel() {
     const list = await loadWhitelist();
-    if (list.length === 0) return false;
+    if (list.length === 0) return { active: false, parentInfoReady: true };
     const info = readParentChannelInfo();
-    if (!info || !info.channelId) return false;
-    return list.some((e) => e.channelId === info.channelId);
+    if (!info || !info.handle) return { active: false, parentInfoReady: false };
+    const active = list.some((e) => e.handle === info.handle);
+    return { active, parentInfoReady: true };
   }
 
   // Always-on listener so the popup can ask "what's the current channel?"
@@ -58,7 +61,7 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg && msg.type === MSG.GET_CHANNEL_INFO) {
       const info = readParentChannelInfo();
-      sendResponse(info || { channelId: null, channelName: null });
+      sendResponse(info || { handle: null, channelName: null });
       return false;
     }
     return false;
@@ -543,15 +546,42 @@
   let watchersAttached = false;
   window.__ylctEnabled = false;
 
+  // Parent channel meta can mount lazily during SPA navigation. Retry with
+  // backoff (up to ~30s) so the iframe doesn't stay disabled just because
+  // it sampled the parent doc one tick too early.
+  let parentInfoRetryTimer = null;
+  const PARENT_INFO_RETRY_MS = 500;
+  const PARENT_INFO_MAX_ATTEMPTS = 60;
+  let parentInfoAttempts = 0;
+
+  function clearParentInfoRetry() {
+    if (parentInfoRetryTimer) {
+      clearTimeout(parentInfoRetryTimer);
+      parentInfoRetryTimer = null;
+    }
+    parentInfoAttempts = 0;
+  }
+
   async function recomputeEnabled() {
-    const next = await shouldOperateForCurrentChannel();
-    if (next === enabled) return;
-    enabled = next;
+    const { active, parentInfoReady } = await shouldOperateForCurrentChannel();
+
+    if (!parentInfoReady && !parentInfoRetryTimer && parentInfoAttempts < PARENT_INFO_MAX_ATTEMPTS) {
+      parentInfoAttempts += 1;
+      parentInfoRetryTimer = setTimeout(() => {
+        parentInfoRetryTimer = null;
+        recomputeEnabled();
+      }, PARENT_INFO_RETRY_MS);
+    } else if (parentInfoReady) {
+      clearParentInfoRetry();
+    }
+
+    if (active === enabled) return;
+    enabled = active;
     window.__ylctEnabled = enabled;
     const info = readParentChannelInfo();
     console.log(
       "[ylct] enabled =", enabled,
-      info ? `channelId=${info.channelId}` : "(no parent channel info)"
+      info ? `handle=${info.handle}` : "(no parent channel info)"
     );
     if (enabled && !watchersAttached) {
       watchersAttached = true;
@@ -603,13 +633,16 @@
     recomputeEnabled();
   }
 
-  // Flush cache to storage when the page is about to unload.
+  // Flush cache to storage when the page is about to unload, and stop the
+  // parent-info retry loop so it doesn't keep firing after the iframe goes
+  // away during YouTube SPA navigation.
   window.addEventListener("pagehide", () => {
     if (cacheFlushTimer) {
       clearTimeout(cacheFlushTimer);
       cacheFlushTimer = null;
       flushCacheToStorage();
     }
+    clearParentInfoRetry();
   });
 
   init();
