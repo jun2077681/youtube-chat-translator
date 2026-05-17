@@ -134,10 +134,14 @@
       );
   }
 
-  // Collapse runs of the same char (3+) down to one. Stylistic emphasis
-  // like "ありがとうううう" should share a cache slot with "ありがとう".
+  // Collapse runs of the same char (3+) so "ありがとうううう" shares a
+  // cache slot with "ありがとう". The non-global test() probe skips both
+  // the regex pass and the allocation for messages without any 3+ run.
+  const REPEAT_RE = /(.)\1{2,}/u;
+  const REPEAT_RE_G = /(.)\1{2,}/gu;
   function collapseRepeats(text) {
-    return (text || "").replace(/(.)\1{2,}/gu, "$1");
+    if (!text || !REPEAT_RE.test(text)) return text || "";
+    return text.replace(REPEAT_RE_G, "$1");
   }
 
   // Cache key used for storage lookups and in-flight dedup.
@@ -214,23 +218,17 @@
     queueLen: queue.length,
   });
 
-  // In-flight dedup: cacheKey -> Set<placeholderId>. Multiple chat
-  // messages with the same normalized text piggy-back on the first
-  // translation request; the response fans out to every sibling.
+  // In-flight dedup: cacheKey -> Set<placeholderId>. Every member id also
+  // has a matching pendingMap entry; consumeSiblings clears both.
   const inflightByKey = new Map();
 
-  // Adaptive sampling: under heavy backlog (replay backfill etc.) drop a
-  // fraction of newly arriving un-cached, non-deduped messages so the
-  // queue can drain without ballooning Max-plan usage.
+  // Drop a fraction of un-cached, non-deduped messages under heavy backlog
+  // (replay backfill etc.) so the queue drains instead of ballooning.
   const SAMPLING_SOFT = 40;   // queue+pending above this -> drop 50%
   const SAMPLING_HARD = 80;   // above this -> drop 75%
 
-  function currentLoad() {
-    return queue.length + pendingMap.size;
-  }
-
   function shouldDrop() {
-    const load = currentLoad();
+    const load = queue.length + pendingMap.size;
     if (load >= SAMPLING_HARD) return Math.random() < 0.75;
     if (load >= SAMPLING_SOFT) return Math.random() < 0.5;
     return false;
@@ -287,6 +285,12 @@
     return [id];
   }
 
+  function failAll(batch, reason) {
+    batch.forEach((b) => {
+      for (const sid of consumeSiblings(b.id)) markError(sid, reason);
+    });
+  }
+
   function flushBatch() {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     if (queue.length === 0) return;
@@ -297,18 +301,12 @@
     const items = batch.map((b) => ({ id: b.id, ja: b.ja }));
     console.log(`[ylct] flushing batch: ${items.length} item(s)`);
 
-    const failBatch = (reason) => {
-      batch.forEach((b) => {
-        for (const sid of consumeSiblings(b.id)) markError(sid, reason);
-      });
-    };
-
     // Detect "extension context invalidated" up front: chrome.runtime is gone
     // when the user reloads the extension while this page is still open.
     if (!chrome.runtime || !chrome.runtime.id) {
       const reason = "extension reloaded — refresh the page";
       console.warn("[ylct] " + reason);
-      failBatch(reason);
+      failAll(batch, reason);
       return;
     }
 
@@ -317,7 +315,7 @@
         if (chrome.runtime.lastError) {
           const msg = chrome.runtime.lastError.message;
           console.warn("[ylct] sendMessage error:", msg);
-          failBatch(msg);
+          failAll(batch, msg);
           return;
         }
         handleBatchResponse(batch, response);
@@ -326,7 +324,7 @@
       // Throws synchronously when the runtime port is gone.
       const msg = (err && err.message) || String(err);
       console.warn("[ylct] sendMessage threw:", msg);
-      failBatch(msg);
+      failAll(batch, msg);
     }
   }
 
@@ -334,9 +332,7 @@
     if (!response || !response.ok) {
       const err = (response && (response.error || response.raw)) || "unknown error";
       console.warn("[ylct] translate failed:", err);
-      batch.forEach((b) => {
-        for (const sid of consumeSiblings(b.id)) markError(sid, err);
-      });
+      failAll(batch, err);
       return;
     }
 
@@ -564,6 +560,13 @@
       messageObserver.disconnect();
       messageObserver = null;
     }
+    // Abandon work tied to the previous list. The detached placeholder
+    // nodes can't be updated, so don't let pending responses fan out to
+    // them via inflightByKey.
+    queue.length = 0;
+    pendingMap.clear();
+    inflightByKey.clear();
+    stats.pending = 0;
     currentList = list;
     cachedScroller = null; // scroller may have changed too
 
