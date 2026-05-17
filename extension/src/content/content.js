@@ -73,13 +73,15 @@
   const HANGUL = /[가-힣ᄀ-ᇿ㄰-㆏]/g;
 
   const NOISE_PATTERNS = [
-    /^w+$/i,
-    /^[ｗ]+$/,
+    /^[wWｗ草藁笑]+$/,                                // laughter stamps (EN/JP)
     /^k+$/i,
     /^[ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ]+$/,
     /^(lol|lmao|lmfao|rofl|wtf|omg|gg|wp|gj)$/i,
     /^[!?.…]+$/,
     /^[\p{Extended_Pictographic}\s]+$/u,
+    /^[8８]{2,}$/,                                    // 8888 clap
+    /^(おつ|乙|うぽつ|うぽ|り|りょ|うぽつー*)$/,        // chat stamps
+    /^(.)\1{2,}$/u,                                   // bare single-char run
   ];
 
   function isNoise(text) {
@@ -90,14 +92,13 @@
     const text = (rawText || "").trim();
     if (!text) return "skip";
 
-    // Script checks first: Japanese live chats are dominated by hiragana/
-    // katakana hits, so running the cheap regex tests up front lets the
-    // hot path skip the 7-pattern noise scan entirely.
+    // Cheap script checks first; isNoise is the second pass for stamps.
     const hangulMatches = text.match(HANGUL);
     if (hangulMatches && hangulMatches.length / text.length > 0.3) return "korean";
-    if (HIRAGANA.test(text) || KATAKANA.test(text)) return "japanese";
-    if (CJK.test(text)) return "japanese";
+    const hasJa = HIRAGANA.test(text) || KATAKANA.test(text) || CJK.test(text);
 
+    if (hasJa && isNoise(text)) return "noise";
+    if (hasJa) return "japanese";
     if (isNoise(text)) return "noise";
     return "skip";
   }
