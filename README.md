@@ -10,6 +10,8 @@ YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`
 
 ## 빠른 시작
 
+> **개발자가 아니라 그냥 쓰고 싶다면**: [Releases 페이지](https://github.com/jun2077681/youtube-chat-translator/releases)에서 최신 `ylct-X.Y.Z.zip` 다운로드 → 압축 해제 → `native-host\install.ps1` 실행 → `chrome://extensions`에서 `extension/` 폴더를 unpacked로 로드. 빌드 단계 생략됩니다. 사전 요구사항 0번(Node.js + Claude CLI)은 여전히 필요합니다.
+
 ### 0. 사전 요구사항
 - Windows 10/11 (현재 install 스크립트는 Windows만 지원)
 - **Node.js 18+** (PATH에 등록)
