@@ -1,10 +1,14 @@
 # YouTube Live Chat Translator — Native Host installer (Windows, user scope).
 #
 # Usage:
+#   powershell -ExecutionPolicy Bypass -File install.ps1
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId <CHROME_EXTENSION_ID>
 #
+# The ExtensionId default is the canonical ID derived from extension/manifest.json:key.
+# Override only if you re-keyed the extension.
+#
 # Effects:
-#   - Generates host.bat wrapper so Chrome can spawn `node host.js`
+#   - Generates host.bat wrapper so Chrome can spawn `node dist\host.js`
 #   - Rewrites manifest.json with absolute path and extension origin
 #   - Registers HKCU\Software\Google\Chrome\NativeMessagingHosts\com.ylct.translator
 #
@@ -12,8 +16,7 @@
 #   Remove-Item "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.ylct.translator"
 
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ExtensionId
+    [string]$ExtensionId = "glcmldcajgllcmlldojlbhdkaficlheo"
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +24,8 @@ $ErrorActionPreference = "Stop"
 if ($ExtensionId -notmatch '^[a-p]{32}$') {
     Write-Error "ExtensionId must be 32 lowercase letters a-p (Chrome format). Got: $ExtensionId"
 }
+
+Write-Host "[ok] Using ExtensionId: $ExtensionId"
 
 $HostName = "com.ylct.translator"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
