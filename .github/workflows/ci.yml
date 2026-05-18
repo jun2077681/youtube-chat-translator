@@ -6,16 +6,21 @@ on:
   pull_request:
     branches: [main, dev]
 
+env:
+  # Opt into Node.js 24 for all JS-based actions ahead of the
+  # 2026-06-02 default flip (Node 20 deprecation).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     name: typecheck + build
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
