@@ -17,13 +17,34 @@ YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`
   - 설치 확인: 터미널에서 `claude -p "안녕"` 실행 → 응답이 오면 OK
 - **Google Chrome**
 
-### 1. 확장 로드
+### 1. 확장 빌드
+extension은 TypeScript로 작성되며 esbuild로 번들합니다. 최초 1회 + 소스 변경 시마다 빌드 필요.
+
+```powershell
+cd D:\path\to\youtube-chat-translator\extension
+npm install
+npm run build
+```
+
+산출물은 `extension/dist/`에 생성됩니다.
+
+개발 중 자동 재빌드:
+```powershell
+npm run watch
+```
+
+타입 검사만:
+```powershell
+npm run typecheck
+```
+
+### 2. 확장 로드
 1. Chrome `chrome://extensions` 접속
 2. **개발자 모드 ON**
-3. **압축해제된 확장 프로그램 로드** → `youtube-chat-translator/extension/` 폴더 선택
+3. **압축해제된 확장 프로그램 로드** → `youtube-chat-translator/extension/dist/` 폴더 선택 (소스 디렉토리 아닌 **dist**)
 4. 로드된 확장의 **ID(32자리 a-p)**를 복사
 
-### 2. Native Host 등록 (관리자 권한 불필요)
+### 3. Native Host 등록 (관리자 권한 불필요)
 PowerShell에서:
 
 ```powershell
@@ -39,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId aaaaaaaaaaaaaa
 [ok] Registered HKCU:\...\com.ylct.translator -> ...
 ```
 
-### 3. 채널 화이트리스트 등록
+### 4. 채널 화이트리스트 등록
 **중요**: 화이트리스트가 비어있으면 **번역이 동작하지 않습니다**. 사용할 채널을 등록해야 합니다.
 
 1. 등록할 YouTube 라이브 영상 페이지(`/watch?v=...`) 열기
@@ -129,19 +150,25 @@ youtube-chat-translator/
 ├── docs/
 │   ├── DESIGN.md              # 아키텍처/설계
 │   └── CHANGELOG.md           # 마일스톤 변경 이력
-├── extension/                 # Chrome 확장 (MV3)
-│   ├── manifest.json
+├── extension/                 # Chrome 확장 (MV3, TypeScript)
+│   ├── manifest.json          # dist에 복사됨; 평면 경로 사용 (e.g. "background.js")
+│   ├── package.json           # esbuild, typescript, @types/chrome
+│   ├── tsconfig.json          # strict 모드
+│   ├── build.mjs              # esbuild 번들러 (entry별 IIFE)
+│   ├── dist/                  # 빌드 산출물 (gitignore, Chrome 로드 대상)
 │   └── src/
+│       ├── shared/
+│       │   └── constants.ts   # ESM 공유 상수/타입 (MSG, KEY, ChannelInfo 등)
 │       ├── background/
-│       │   └── background.js  # service worker, native bridge
+│       │   └── background.ts  # service worker, native bridge
 │       ├── content/
-│       │   ├── content.js          # 채팅 감지 + 배치 + DOM 주입 (live_chat iframe)
-│       │   ├── input-translator.js # KO→JA 입력 미리보기 (live_chat iframe)
-│       │   ├── channel-detector.js # 채널 정보 추출 (/watch 페이지)
+│       │   ├── content.ts          # 채팅 감지 + 배치 + DOM 주입 (live_chat iframe)
+│       │   ├── input-translator.ts # KO→JA 입력 미리보기 (live_chat iframe)
+│       │   ├── channel-detector.ts # 채널 정보 추출 (/watch 페이지)
 │       │   └── content.css
 │       └── popup/
-│           ├── popup.html     # 메인/디버그 탭
-│           └── popup.js
+│           ├── popup.html     # 메인/디버그 탭 (dist에 복사됨)
+│           └── popup.ts
 └── native-host/               # Native Messaging Host (Node.js)
     ├── host.js                # 진입점
     ├── nm-protocol.js         # 4-byte length wire protocol
