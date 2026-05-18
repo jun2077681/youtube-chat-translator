@@ -73,14 +73,26 @@
   const HANGUL = /[가-힣ᄀ-ᇿ㄰-㆏]/g;
 
   const NOISE_PATTERNS = [
-    /^w+$/i,
-    /^[ｗ]+$/,
+    /^[wWｗ草藁笑]+$/,                                // laughter stamps (EN/JP)
     /^k+$/i,
     /^[ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ]+$/,
     /^(lol|lmao|lmfao|rofl|wtf|omg|gg|wp|gj)$/i,
     /^[!?.…]+$/,
     /^[\p{Extended_Pictographic}\s]+$/u,
+    /^[8８]{2,}$/,                                    // 8888 clap
+    /^(おつ|乙|うぽつ|うぽ|り|りょ|うぽつー*)$/,        // chat stamps
+    /^(.)\1{2,}$/u,                                   // bare single-char run
   ];
+
+  // Reject pictogram-dominated messages even when they contain stray kana.
+  const PICTOGRAM_NOISE_RATIO = 0.7;
+  const PICTOGRAM_RE = /[\p{Extended_Pictographic}\s]/gu;
+
+  function pictogramRatio(text) {
+    if (!text) return 0;
+    const m = text.match(PICTOGRAM_RE);
+    return m ? m.length / text.length : 0;
+  }
 
   function isNoise(text) {
     return NOISE_PATTERNS.some((re) => re.test(text));
@@ -90,14 +102,15 @@
     const text = (rawText || "").trim();
     if (!text) return "skip";
 
-    // Script checks first: Japanese live chats are dominated by hiragana/
-    // katakana hits, so running the cheap regex tests up front lets the
-    // hot path skip the 7-pattern noise scan entirely.
+    // Cheap script checks first; pictogram-ratio scan only runs if Japanese
+    // is detected (most non-JP messages skip the Unicode-property regex).
     const hangulMatches = text.match(HANGUL);
     if (hangulMatches && hangulMatches.length / text.length > 0.3) return "korean";
-    if (HIRAGANA.test(text) || KATAKANA.test(text)) return "japanese";
-    if (CJK.test(text)) return "japanese";
+    const hasJa = HIRAGANA.test(text) || KATAKANA.test(text) || CJK.test(text);
 
+    if (hasJa && pictogramRatio(text) >= PICTOGRAM_NOISE_RATIO) return "noise";
+    if (hasJa && isNoise(text)) return "noise";
+    if (hasJa) return "japanese";
     if (isNoise(text)) return "noise";
     return "skip";
   }
@@ -119,6 +132,21 @@
       .replace(/[！-～]/g, (ch) =>
         String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
       );
+  }
+
+  // Collapse runs of the same char (3+) so "ありがとうううう" shares a
+  // cache slot with "ありがとう". The non-global test() probe skips both
+  // the regex pass and the allocation for messages without any 3+ run.
+  const REPEAT_RE = /(.)\1{2,}/u;
+  const REPEAT_RE_G = /(.)\1{2,}/gu;
+  function collapseRepeats(text) {
+    if (!text || !REPEAT_RE.test(text)) return text || "";
+    return text.replace(REPEAT_RE_G, "$1");
+  }
+
+  // Cache key used for storage lookups and in-flight dedup.
+  function cacheKey(text) {
+    return collapseRepeats(normalize(text));
   }
 
   // LRU using insertion-order Map.
@@ -181,8 +209,30 @@
     seen: 0, japanese: 0, korean: 0, noise: 0, skip: 0,
     pending: 0, done: 0, error: 0,
     cacheHits: 0, hidden: 0, self: 0,
+    dedupHits: 0, sampled: 0,
   };
-  window.__ylctStats = () => ({ ...stats, cacheSize: cache.size });
+  window.__ylctStats = () => ({
+    ...stats,
+    cacheSize: cache.size,
+    inflightKeys: inflightByKey.size,
+    queueLen: queue.length,
+  });
+
+  // In-flight dedup: cacheKey -> Set<placeholderId>. Every member id also
+  // has a matching pendingMap entry; consumeSiblings clears both.
+  const inflightByKey = new Map();
+
+  // Drop a fraction of un-cached, non-deduped messages under heavy backlog
+  // (replay backfill etc.) so the queue drains instead of ballooning.
+  const SAMPLING_SOFT = 40;   // queue+pending above this -> drop 50%
+  const SAMPLING_HARD = 80;   // above this -> drop 75%
+
+  function shouldDrop() {
+    const load = queue.length + pendingMap.size;
+    if (load >= SAMPLING_HARD) return Math.random() < 0.75;
+    if (load >= SAMPLING_SOFT) return Math.random() < 0.5;
+    return false;
+  }
 
   window.__ylctDebug = () => {
     const scroller = getChatScroller();
@@ -209,9 +259,9 @@
     flushTimer = setTimeout(flushBatch, batchWindowMs);
   }
 
-  function enqueue(node, id, ja) {
+  function enqueue(node, id, ja, key) {
     queue.push({ id, ja, node });
-    pendingMap.set(id, { node, ja });
+    pendingMap.set(id, { node, ja, key });
     stats.pending += 1;
 
     if (queue.length >= MAX_BATCH_SIZE) {
@@ -219,6 +269,26 @@
     } else {
       scheduleFlush();
     }
+  }
+
+  // For a primary id (one we actually sent), return all ids that share
+  // the same inflight bucket and clear the bucket so subsequent callers
+  // see no entry. Falls back to [id] for non-deduped messages.
+  function consumeSiblings(id) {
+    const entry = pendingMap.get(id);
+    const key = entry && entry.key;
+    if (key && inflightByKey.has(key)) {
+      const ids = Array.from(inflightByKey.get(key));
+      inflightByKey.delete(key);
+      return ids;
+    }
+    return [id];
+  }
+
+  function failAll(batch, reason) {
+    batch.forEach((b) => {
+      for (const sid of consumeSiblings(b.id)) markError(sid, reason);
+    });
   }
 
   function flushBatch() {
@@ -236,7 +306,7 @@
     if (!chrome.runtime || !chrome.runtime.id) {
       const reason = "extension reloaded — refresh the page";
       console.warn("[ylct] " + reason);
-      batch.forEach((b) => markError(b.id, reason));
+      failAll(batch, reason);
       return;
     }
 
@@ -245,7 +315,7 @@
         if (chrome.runtime.lastError) {
           const msg = chrome.runtime.lastError.message;
           console.warn("[ylct] sendMessage error:", msg);
-          batch.forEach((b) => markError(b.id, msg));
+          failAll(batch, msg);
           return;
         }
         handleBatchResponse(batch, response);
@@ -254,7 +324,7 @@
       // Throws synchronously when the runtime port is gone.
       const msg = (err && err.message) || String(err);
       console.warn("[ylct] sendMessage threw:", msg);
-      batch.forEach((b) => markError(b.id, msg));
+      failAll(batch, msg);
     }
   }
 
@@ -262,21 +332,32 @@
     if (!response || !response.ok) {
       const err = (response && (response.error || response.raw)) || "unknown error";
       console.warn("[ylct] translate failed:", err);
-      batch.forEach((b) => markError(b.id, err));
+      failAll(batch, err);
       return;
     }
 
     const translated = new Set();
+    let dedupFanout = 0;
     for (const r of response.translations) {
-      applyTranslation(r.id, r.ko);
-      translated.add(r.id);
+      const siblings = consumeSiblings(r.id);
+      if (siblings.length > 1) dedupFanout += siblings.length - 1;
+      for (const sid of siblings) {
+        applyTranslation(sid, r.ko);
+        translated.add(sid);
+      }
     }
     batch.forEach((b) => {
-      if (!translated.has(b.id)) markError(b.id, "no translation in response");
+      if (translated.has(b.id)) return;
+      for (const sid of consumeSiblings(b.id)) {
+        if (!translated.has(sid)) markError(sid, "no translation in response");
+      }
     });
 
     if (response.elapsedMs != null) {
-      console.log(`[ylct] batch done in ${response.elapsedMs}ms (${translated.size}/${batch.length})`);
+      console.log(
+        `[ylct] batch done in ${response.elapsedMs}ms ` +
+        `(${translated.size}/${batch.length + dedupFanout}, dedup=${dedupFanout})`
+      );
     }
   }
 
@@ -371,9 +452,9 @@
     pendingMap.delete(id);
     stats.pending = Math.max(0, stats.pending - 1);
 
-    // Cache the result keyed by normalized source text.
+    // Cache the result keyed by normalized + repeat-collapsed source text.
     if (entry && entry.ja && typeof ko === "string") {
-      cachePut(normalize(entry.ja), ko);
+      cachePut(entry.key || cacheKey(entry.ja), ko);
     }
 
     if (!el) return;
@@ -424,7 +505,7 @@
 
     // Cache lookup BEFORE placeholder + visibility check.
     // Cached translations are free, so always apply even when hidden.
-    const key = normalize(text);
+    const key = cacheKey(text);
     const cached = cacheGet(key);
     if (cached != null) {
       stats.cacheHits += 1;
@@ -437,6 +518,16 @@
       return;
     }
 
+    // Piggy-back on an in-flight translation for the same key.
+    if (inflightByKey.has(key)) {
+      if (!injectPlaceholder(node, id)) return;
+      inflightByKey.get(key).add(id);
+      pendingMap.set(id, { node, ja: text, key });
+      stats.pending += 1;
+      stats.dedupHits += 1;
+      return;
+    }
+
     // Skip un-cached translation when the iframe is not visible
     // to conserve Max usage.
     if (document.hidden) {
@@ -444,8 +535,15 @@
       return;
     }
 
+    // Backlog sampling runs AFTER cache + dedup so free paths stay unaffected.
+    if (shouldDrop()) {
+      stats.sampled += 1;
+      return;
+    }
+
     if (!injectPlaceholder(node, id)) return;
-    enqueue(node, id, text);
+    inflightByKey.set(key, new Set([id]));
+    enqueue(node, id, text, key);
   }
 
   // YouTube re-renders the chat list when the user switches between
@@ -462,6 +560,13 @@
       messageObserver.disconnect();
       messageObserver = null;
     }
+    // Abandon work tied to the previous list. The detached placeholder
+    // nodes can't be updated, so don't let pending responses fan out to
+    // them via inflightByKey.
+    queue.length = 0;
+    pendingMap.clear();
+    inflightByKey.clear();
+    stats.pending = 0;
     currentList = list;
     cachedScroller = null; // scroller may have changed too
 
