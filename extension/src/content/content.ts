@@ -1,16 +1,34 @@
 // Content script (runs in the live-chat iframe): detect Japanese messages ->
 // insert placeholder -> batch -> background -> Native Host -> apply translation.
 
-(() => {
-  "use strict";
+import {
+  KEY,
+  MSG,
+  SETTINGS_DEFAULTS,
+  readChannelInfoFromDocument,
+  type BatchResponse,
+  type ChannelInfo,
+  type Settings,
+  type Translation,
+  type WhitelistEntry,
+} from "../shared/constants";
 
+declare global {
+  interface Window {
+    __ylctContentLoaded?: boolean;
+    __ylctEnabled?: boolean;
+    __ylctSentByMe?: Set<string>;
+    __ylctStats?: () => unknown;
+    __ylctDebug?: () => unknown;
+  }
+}
+
+(() => {
   if (window.__ylctContentLoaded) {
     console.warn("[ylct] content script already loaded, skipping");
     return;
   }
   window.__ylctContentLoaded = true;
-
-  const { MSG, KEY, SETTINGS_DEFAULTS, readChannelInfoFromDocument } = globalThis.YLCT_CONST;
 
   const DEFAULT_BATCH_WINDOW_MS = SETTINGS_DEFAULTS.batchWindowMs;
   const MIN_BATCH_WINDOW_MS = 5_000;
@@ -23,31 +41,26 @@
   const SETTINGS_KEY = KEY.SETTINGS;
 
   let batchWindowMs = DEFAULT_BATCH_WINDOW_MS;
-  let maxTurns = SETTINGS_DEFAULTS.maxTurns; // 0 = no auto-restart
+  let maxTurns = SETTINGS_DEFAULTS.maxTurns;
 
-  // ---------- channel info from parent /watch page ----------
-
-  function readParentChannelInfo() {
+  function readParentChannelInfo(): ChannelInfo | null {
     try {
       return readChannelInfoFromDocument(window.parent && window.parent.document);
-    } catch (_) {
+    } catch {
       return null;
     }
   }
 
-  function loadWhitelist() {
+  function loadWhitelist(): Promise<WhitelistEntry[]> {
     return new Promise((resolve) => {
       chrome.storage.local.get(WHITELIST_KEY, (data) => {
-        const list = data && data[WHITELIST_KEY];
+        const list = data && (data[WHITELIST_KEY] as WhitelistEntry[] | undefined);
         resolve(Array.isArray(list) ? list : []);
       });
     });
   }
 
-  // Whitelist is opt-in: empty means OFF. `parentInfoReady` is false when
-  // the /watch page hasn't rendered its owner /@handle yet so the caller
-  // can poll instead of waiting for the next whitelist mutation.
-  async function shouldOperateForCurrentChannel() {
+  async function shouldOperateForCurrentChannel(): Promise<{ active: boolean; parentInfoReady: boolean }> {
     const list = await loadWhitelist();
     if (list.length === 0) return { active: false, parentInfoReady: true };
     const info = readParentChannelInfo();
@@ -56,9 +69,7 @@
     return { active, parentInfoReady: true };
   }
 
-  // Always-on listener so the popup can ask "what's the current channel?"
-  // even when translation is disabled for this channel.
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg: { type?: string }, _sender, sendResponse) => {
     if (msg && msg.type === MSG.GET_CHANNEL_INFO) {
       const info = readParentChannelInfo();
       sendResponse(info || { handle: null, channelName: null });
@@ -72,38 +83,37 @@
   const CJK = /[一-鿿]/;
   const HANGUL = /[가-힣ᄀ-ᇿ㄰-㆏]/g;
 
-  const NOISE_PATTERNS = [
-    /^[wWｗ草藁笑]+$/,                                // laughter stamps (EN/JP)
+  const NOISE_PATTERNS: RegExp[] = [
+    /^[wWｗ草藁笑]+$/,
     /^k+$/i,
     /^[ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ]+$/,
     /^(lol|lmao|lmfao|rofl|wtf|omg|gg|wp|gj)$/i,
     /^[!?.…]+$/,
     /^[\p{Extended_Pictographic}\s]+$/u,
-    /^[8８]{2,}$/,                                    // 8888 clap
-    /^(おつ|乙|うぽつ|うぽ|り|りょ|うぽつー*)$/,        // chat stamps
-    /^(.)\1{2,}$/u,                                   // bare single-char run
+    /^[8８]{2,}$/,
+    /^(おつ|乙|うぽつ|うぽ|り|りょ|うぽつー*)$/,
+    /^(.)\1{2,}$/u,
   ];
 
-  // Reject pictogram-dominated messages even when they contain stray kana.
   const PICTOGRAM_NOISE_RATIO = 0.7;
   const PICTOGRAM_RE = /[\p{Extended_Pictographic}\s]/gu;
 
-  function pictogramRatio(text) {
+  function pictogramRatio(text: string): number {
     if (!text) return 0;
     const m = text.match(PICTOGRAM_RE);
     return m ? m.length / text.length : 0;
   }
 
-  function isNoise(text) {
+  function isNoise(text: string): boolean {
     return NOISE_PATTERNS.some((re) => re.test(text));
   }
 
-  function classify(rawText) {
+  type Verdict = "skip" | "korean" | "japanese" | "noise";
+
+  function classify(rawText: string): Verdict {
     const text = (rawText || "").trim();
     if (!text) return "skip";
 
-    // Cheap script checks first; pictogram-ratio scan only runs if Japanese
-    // is detected (most non-JP messages skip the Unicode-property regex).
     const hangulMatches = text.match(HANGUL);
     if (hangulMatches && hangulMatches.length / text.length > 0.3) return "korean";
     const hasJa = HIRAGANA.test(text) || KATAKANA.test(text) || CJK.test(text);
@@ -115,84 +125,81 @@
     return "skip";
   }
 
-  function extractText(node) {
-    const messageEl = node.querySelector("#message");
+  function extractText(node: HTMLElement): string {
+    const messageEl = node.querySelector<HTMLElement>("#message");
     if (!messageEl) return "";
     return (messageEl.innerText || messageEl.textContent || "").trim();
   }
 
-  // ---------- normalization + LRU cache ----------
-
-  function normalize(text) {
+  function normalize(text: string): string {
     return (text || "")
       .normalize("NFC")
       .trim()
       .replace(/\s+/g, " ")
-      // Full-width digits and ASCII -> half-width
-      .replace(/[！-～]/g, (ch) =>
-        String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
-      );
+      .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
   }
 
-  // Collapse runs of the same char (3+) so "ありがとうううう" shares a
-  // cache slot with "ありがとう". The non-global test() probe skips both
-  // the regex pass and the allocation for messages without any 3+ run.
   const REPEAT_RE = /(.)\1{2,}/u;
   const REPEAT_RE_G = /(.)\1{2,}/gu;
-  function collapseRepeats(text) {
+  function collapseRepeats(text: string): string {
     if (!text || !REPEAT_RE.test(text)) return text || "";
     return text.replace(REPEAT_RE_G, "$1");
   }
 
-  // Cache key used for storage lookups and in-flight dedup.
-  function cacheKey(text) {
+  function cacheKey(text: string): string {
     return collapseRepeats(normalize(text));
   }
 
-  // LRU using insertion-order Map.
-  const cache = new Map();
+  const cache = new Map<string, string>();
 
-  function cacheGet(key) {
+  function cacheGet(key: string): string | null {
     if (!cache.has(key)) return null;
-    const value = cache.get(key);
+    const value = cache.get(key)!;
     cache.delete(key);
-    cache.set(key, value); // move to most-recent
+    cache.set(key, value);
     return value;
   }
 
-  function cachePut(key, value) {
+  function cachePut(key: string, value: string): void {
     if (cache.has(key)) cache.delete(key);
     cache.set(key, value);
     while (cache.size > CACHE_MAX_ENTRIES) {
       const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
       cache.delete(oldest);
     }
     scheduleCacheFlush();
   }
 
-  let cacheFlushTimer = null;
-  function scheduleCacheFlush() {
+  let cacheFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleCacheFlush(): void {
     if (cacheFlushTimer) return;
     cacheFlushTimer = setTimeout(flushCacheToStorage, CACHE_FLUSH_DEBOUNCE_MS);
   }
 
-  function flushCacheToStorage() {
+  interface StoredCache {
+    version: number;
+    entries: Array<[string, string]>;
+  }
+
+  function flushCacheToStorage(): void {
     cacheFlushTimer = null;
     const entries = Array.from(cache.entries());
-    chrome.storage.local.set({ [CACHE_KEY]: { version: 1, entries } }, () => {
+    const payload: StoredCache = { version: 1, entries };
+    chrome.storage.local.set({ [CACHE_KEY]: payload }, () => {
       if (chrome.runtime.lastError) {
         console.warn("[ylct] cache flush failed:", chrome.runtime.lastError.message);
       }
     });
   }
 
-  function loadCacheFromStorage(done) {
+  function loadCacheFromStorage(done?: () => void): void {
     chrome.storage.local.get(CACHE_KEY, (data) => {
       if (chrome.runtime.lastError) {
         console.warn("[ylct] cache load failed:", chrome.runtime.lastError.message);
         return done && done();
       }
-      const stored = data && data[CACHE_KEY];
+      const stored = data && (data[CACHE_KEY] as StoredCache | undefined);
       if (stored && Array.isArray(stored.entries)) {
         for (const [k, v] of stored.entries) {
           if (typeof k === "string" && typeof v === "string") cache.set(k, v);
@@ -203,9 +210,23 @@
     });
   }
 
-  // ---------- queue + batch ----------
+  interface Stats {
+    seen: number;
+    japanese: number;
+    korean: number;
+    noise: number;
+    skip: number;
+    pending: number;
+    done: number;
+    error: number;
+    cacheHits: number;
+    hidden: number;
+    self: number;
+    dedupHits: number;
+    sampled: number;
+  }
 
-  const stats = {
+  const stats: Stats = {
     seen: 0, japanese: 0, korean: 0, noise: 0, skip: 0,
     pending: 0, done: 0, error: 0,
     cacheHits: 0, hidden: 0, self: 0,
@@ -218,16 +239,12 @@
     queueLen: queue.length,
   });
 
-  // In-flight dedup: cacheKey -> Set<placeholderId>. Every member id also
-  // has a matching pendingMap entry; consumeSiblings clears both.
-  const inflightByKey = new Map();
+  const inflightByKey = new Map<string, Set<string>>();
 
-  // Drop a fraction of un-cached, non-deduped messages under heavy backlog
-  // (replay backfill etc.) so the queue drains instead of ballooning.
-  const SAMPLING_SOFT = 40;   // queue+pending above this -> drop 50%
-  const SAMPLING_HARD = 80;   // above this -> drop 75%
+  const SAMPLING_SOFT = 40;
+  const SAMPLING_HARD = 80;
 
-  function shouldDrop() {
+  function shouldDrop(): boolean {
     const load = queue.length + pendingMap.size;
     if (load >= SAMPLING_HARD) return Math.random() < 0.75;
     if (load >= SAMPLING_SOFT) return Math.random() < 0.5;
@@ -250,16 +267,28 @@
     };
   };
 
-  let queue = [];
-  const pendingMap = new Map();
-  let flushTimer = null;
+  interface QueueItem {
+    id: string;
+    ja: string;
+    node: HTMLElement;
+  }
 
-  function scheduleFlush() {
+  interface PendingEntry {
+    node: HTMLElement;
+    ja: string;
+    key: string;
+  }
+
+  let queue: QueueItem[] = [];
+  const pendingMap = new Map<string, PendingEntry>();
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleFlush(): void {
     if (flushTimer) return;
     flushTimer = setTimeout(flushBatch, batchWindowMs);
   }
 
-  function enqueue(node, id, ja, key) {
+  function enqueue(node: HTMLElement, id: string, ja: string, key: string): void {
     queue.push({ id, ja, node });
     pendingMap.set(id, { node, ja, key });
     stats.pending += 1;
@@ -271,27 +300,24 @@
     }
   }
 
-  // For a primary id (one we actually sent), return all ids that share
-  // the same inflight bucket and clear the bucket so subsequent callers
-  // see no entry. Falls back to [id] for non-deduped messages.
-  function consumeSiblings(id) {
+  function consumeSiblings(id: string): string[] {
     const entry = pendingMap.get(id);
     const key = entry && entry.key;
     if (key && inflightByKey.has(key)) {
-      const ids = Array.from(inflightByKey.get(key));
+      const ids = Array.from(inflightByKey.get(key)!);
       inflightByKey.delete(key);
       return ids;
     }
     return [id];
   }
 
-  function failAll(batch, reason) {
+  function failAll(batch: QueueItem[], reason: string): void {
     batch.forEach((b) => {
       for (const sid of consumeSiblings(b.id)) markError(sid, reason);
     });
   }
 
-  function flushBatch() {
+  function flushBatch(): void {
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     if (queue.length === 0) return;
 
@@ -301,8 +327,6 @@
     const items = batch.map((b) => ({ id: b.id, ja: b.ja }));
     console.log(`[ylct] flushing batch: ${items.length} item(s)`);
 
-    // Detect "extension context invalidated" up front: chrome.runtime is gone
-    // when the user reloads the extension while this page is still open.
     if (!chrome.runtime || !chrome.runtime.id) {
       const reason = "extension reloaded — refresh the page";
       console.warn("[ylct] " + reason);
@@ -311,24 +335,26 @@
     }
 
     try {
-      chrome.runtime.sendMessage({ type: MSG.TRANSLATE_BATCH, items, maxTurns }, (response) => {
-        if (chrome.runtime.lastError) {
-          const msg = chrome.runtime.lastError.message;
-          console.warn("[ylct] sendMessage error:", msg);
-          failAll(batch, msg);
-          return;
+      chrome.runtime.sendMessage(
+        { type: MSG.TRANSLATE_BATCH, items, maxTurns },
+        (response: BatchResponse | undefined) => {
+          if (chrome.runtime.lastError) {
+            const msg = chrome.runtime.lastError.message || "sendMessage error";
+            console.warn("[ylct] sendMessage error:", msg);
+            failAll(batch, msg);
+            return;
+          }
+          handleBatchResponse(batch, response);
         }
-        handleBatchResponse(batch, response);
-      });
+      );
     } catch (err) {
-      // Throws synchronously when the runtime port is gone.
-      const msg = (err && err.message) || String(err);
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn("[ylct] sendMessage threw:", msg);
       failAll(batch, msg);
     }
   }
 
-  function handleBatchResponse(batch, response) {
+  function handleBatchResponse(batch: QueueItem[], response: BatchResponse | undefined): void {
     if (!response || !response.ok) {
       const err = (response && (response.error || response.raw)) || "unknown error";
       console.warn("[ylct] translate failed:", err);
@@ -336,9 +362,10 @@
       return;
     }
 
-    const translated = new Set();
+    const translations: Translation[] = response.translations || [];
+    const translated = new Set<string>();
     let dedupFanout = 0;
-    for (const r of response.translations) {
+    for (const r of translations) {
       const siblings = consumeSiblings(r.id);
       if (siblings.length > 1) dedupFanout += siblings.length - 1;
       for (const sid of siblings) {
@@ -361,71 +388,55 @@
     }
   }
 
-  // ---------- scroll preservation ----------
-  //
-  // YouTube auto-scrolls the chat list only while the viewport is at the bottom.
-  // Inserting our placeholder grows scrollHeight, which moves the user away from
-  // "exactly at bottom" and breaks auto-scroll. We snapshot the bottom state
-  // before mutating and re-pin to bottom on the next frame if it was active.
+  const SCROLL_BOTTOM_THRESHOLD = 150;
 
-  // Threshold is generous (~3-4 message rows) so we still treat the user
-  // as "at the bottom" even if YouTube has just appended a new row that
-  // shifted the scroll math slightly.
-  const SCROLL_BOTTOM_THRESHOLD = 150; // px
+  let cachedScroller: HTMLElement | null = null;
 
-  let cachedScroller = null;
-
-  function findScrollableAncestor(node) {
-    let p = node && node.parentElement;
+  function findScrollableAncestor(node: Element | null): HTMLElement | null {
+    let p = node && (node.parentElement as HTMLElement | null);
     while (p) {
       const cs = getComputedStyle(p);
       if ((cs.overflowY === "auto" || cs.overflowY === "scroll") &&
           p.scrollHeight > p.clientHeight) {
         return p;
       }
-      p = p.parentElement;
+      p = p.parentElement as HTMLElement | null;
     }
     return null;
   }
 
-  function getChatScroller() {
+  function getChatScroller(): HTMLElement | null {
     if (cachedScroller && cachedScroller.isConnected) return cachedScroller;
-    // Try the well-known selectors first.
     cachedScroller =
-      document.querySelector("yt-live-chat-item-list-renderer #item-scroller") ||
-      document.querySelector("yt-live-chat-item-list-renderer #contents") ||
+      document.querySelector<HTMLElement>("yt-live-chat-item-list-renderer #item-scroller") ||
+      document.querySelector<HTMLElement>("yt-live-chat-item-list-renderer #contents") ||
       null;
-    // Fallback: walk up from the message list to the first scrollable parent.
     if (!cachedScroller && currentList) {
       cachedScroller = findScrollableAncestor(currentList);
     }
     return cachedScroller;
   }
 
-  function isNearBottom(el) {
+  function isNearBottom(el: HTMLElement | null): boolean {
     if (!el) return false;
     return el.scrollHeight - (el.scrollTop + el.clientHeight) < SCROLL_BOTTOM_THRESHOLD;
   }
 
-  function pinToBottom(scroller) {
+  function pinToBottom(scroller: HTMLElement | null): void {
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
 
-  function preserveBottomScroll(mutateFn) {
+  function preserveBottomScroll(mutateFn: () => void): void {
     const scroller = getChatScroller();
     const wasAtBottom = isNearBottom(scroller);
     mutateFn();
     if (!wasAtBottom || !scroller) return;
-    // Immediate pin in case YouTube already ran its auto-scroll for this tick.
     pinToBottom(scroller);
-    // Second pin after layout settles (covers placeholder height growth).
     requestAnimationFrame(() => pinToBottom(scroller));
   }
 
-  // ---------- DOM injection ----------
-
-  function injectPlaceholder(node, id) {
-    const messageEl = node.querySelector("#message");
+  function injectPlaceholder(node: HTMLElement, id: string): HTMLDivElement | null {
+    const messageEl = node.querySelector<HTMLElement>("#message");
     if (!messageEl) return null;
 
     const div = document.createElement("div");
@@ -433,26 +444,23 @@
     div.dataset.ylctState = "pending";
     div.dataset.ylctId = id;
     div.textContent = "번역 중";
-    // Bottom-scroll preservation is done by the message observer callback
-    // (single measure + pin per mutation tick) so we don't duplicate work.
     messageEl.insertAdjacentElement("afterend", div);
     return div;
   }
 
-  function getInjectedEl(id) {
+  function getInjectedEl(id: string): HTMLElement | null {
     const entry = pendingMap.get(id);
     if (!entry) return null;
     const node = entry.node;
-    return node && node.querySelector(`.ylct-translation[data-ylct-id="${CSS.escape(id)}"]`);
+    return node && node.querySelector<HTMLElement>(`.ylct-translation[data-ylct-id="${CSS.escape(id)}"]`);
   }
 
-  function applyTranslation(id, ko) {
+  function applyTranslation(id: string, ko: string): void {
     const entry = pendingMap.get(id);
     const el = getInjectedEl(id);
     pendingMap.delete(id);
     stats.pending = Math.max(0, stats.pending - 1);
 
-    // Cache the result keyed by normalized + repeat-collapsed source text.
     if (entry && entry.ja && typeof ko === "string") {
       cachePut(entry.key || cacheKey(entry.ja), ko);
     }
@@ -465,7 +473,7 @@
     stats.done += 1;
   }
 
-  function markError(id, reason) {
+  function markError(id: string, reason: string): void {
     const el = getInjectedEl(id);
     pendingMap.delete(id);
     stats.pending = Math.max(0, stats.pending - 1);
@@ -478,9 +486,7 @@
     stats.error += 1;
   }
 
-  // ---------- observer ----------
-
-  function handleNode(node) {
+  function handleNode(node: Node): void {
     if (!enabled) return;
     if (!(node instanceof HTMLElement)) return;
     if (node.tagName !== "YT-LIVE-CHAT-TEXT-MESSAGE-RENDERER") return;
@@ -493,7 +499,6 @@
     const text = extractText(node);
     if (!text) { stats.skip += 1; return; }
 
-    // Skip messages the current user just sent (input-translator records them).
     if (window.__ylctSentByMe && window.__ylctSentByMe.has(text)) {
       stats.self += 1;
       return;
@@ -503,8 +508,6 @@
     stats[verdict] += 1;
     if (verdict !== "japanese") return;
 
-    // Cache lookup BEFORE placeholder + visibility check.
-    // Cached translations are free, so always apply even when hidden.
     const key = cacheKey(text);
     const cached = cacheGet(key);
     if (cached != null) {
@@ -518,24 +521,20 @@
       return;
     }
 
-    // Piggy-back on an in-flight translation for the same key.
     if (inflightByKey.has(key)) {
       if (!injectPlaceholder(node, id)) return;
-      inflightByKey.get(key).add(id);
+      inflightByKey.get(key)!.add(id);
       pendingMap.set(id, { node, ja: text, key });
       stats.pending += 1;
       stats.dedupHits += 1;
       return;
     }
 
-    // Skip un-cached translation when the iframe is not visible
-    // to conserve Max usage.
     if (document.hidden) {
       stats.hidden += 1;
       return;
     }
 
-    // Backlog sampling runs AFTER cache + dedup so free paths stay unaffected.
     if (shouldDrop()) {
       stats.sampled += 1;
       return;
@@ -546,38 +545,27 @@
     enqueue(node, id, text, key);
   }
 
-  // YouTube re-renders the chat list when the user switches between
-  // "Top chat" / "Live chat" modes. The original #items element is replaced,
-  // so we watch the document for list element changes and re-attach.
+  let currentList: HTMLElement | null = null;
+  let messageObserver: MutationObserver | null = null;
 
-  let currentList = null;
-  let messageObserver = null;
-
-  function attachToList(list) {
+  function attachToList(list: HTMLElement): void {
     if (!list || list === currentList) return;
 
     if (messageObserver) {
       messageObserver.disconnect();
       messageObserver = null;
     }
-    // Abandon work tied to the previous list. The detached placeholder
-    // nodes can't be updated, so don't let pending responses fan out to
-    // them via inflightByKey.
     queue.length = 0;
     pendingMap.clear();
     inflightByKey.clear();
     stats.pending = 0;
     currentList = list;
-    cachedScroller = null; // scroller may have changed too
+    cachedScroller = null;
 
-    // Initial backfill: only the most recent 10 messages.
     const existing = Array.from(list.querySelectorAll("yt-live-chat-text-message-renderer"));
-    existing.slice(-10).forEach(handleNode);
+    existing.slice(-10).forEach((n) => handleNode(n));
 
     messageObserver = new MutationObserver((mutations) => {
-      // Measure scroll state once per mutation tick, BEFORE we inject
-      // any placeholders. Then process all added nodes. Finally re-pin
-      // if the user was following at the bottom.
       const scroller = getChatScroller();
       const wasAtBottom = isNearBottom(scroller);
 
@@ -591,7 +579,6 @@
           pinToBottom(scroller);
           requestAnimationFrame(() => pinToBottom(scroller));
         });
-        // Final pin after YouTube's own auto-scroll has had time to fire.
         setTimeout(() => pinToBottom(scroller), 120);
       }
     });
@@ -601,7 +588,7 @@
   }
 
   let warmupSent = false;
-  function maybeWarmup() {
+  function maybeWarmup(): void {
     if (!enabled) return;
     if (warmupSent) return;
     if (!chrome.runtime || !chrome.runtime.id) return;
@@ -616,14 +603,14 @@
         console.log("[ylct] warmup done:", reply);
       });
     } catch (err) {
-      console.warn("[ylct] warmup threw:", err && err.message);
+      console.warn("[ylct] warmup threw:", err instanceof Error ? err.message : err);
       warmupSent = false;
     }
   }
 
-  function watchForList() {
+  function watchForList(): void {
     const tryAttach = () => {
-      const list = document.querySelector("yt-live-chat-item-list-renderer #items");
+      const list = document.querySelector<HTMLElement>("yt-live-chat-item-list-renderer #items");
       if (list) {
         attachToList(list);
         maybeWarmup();
@@ -632,10 +619,8 @@
 
     tryAttach();
 
-    // Watch the whole document for list element replacement (e.g., chat
-    // mode toggle, or initial late mount).
     const rootObserver = new MutationObserver(() => {
-      const list = document.querySelector("yt-live-chat-item-list-renderer #items");
+      const list = document.querySelector<HTMLElement>("yt-live-chat-item-list-renderer #items");
       if (list && list !== currentList) {
         attachToList(list);
       }
@@ -645,21 +630,16 @@
     console.log("[ylct] M5 root watcher armed. window.__ylctStats() for counters.");
   }
 
-  // Live-toggleable enabled state. Mirrored to window so input-translator.js
-  // (separate IIFE in the same isolated world) can gate on it too.
   let enabled = false;
   let watchersAttached = false;
   window.__ylctEnabled = false;
 
-  // Parent channel meta can mount lazily during SPA navigation. Retry with
-  // backoff (up to ~30s) so the iframe doesn't stay disabled just because
-  // it sampled the parent doc one tick too early.
-  let parentInfoRetryTimer = null;
+  let parentInfoRetryTimer: ReturnType<typeof setTimeout> | null = null;
   const PARENT_INFO_RETRY_MS = 500;
   const PARENT_INFO_MAX_ATTEMPTS = 60;
   let parentInfoAttempts = 0;
 
-  function clearParentInfoRetry() {
+  function clearParentInfoRetry(): void {
     if (parentInfoRetryTimer) {
       clearTimeout(parentInfoRetryTimer);
       parentInfoRetryTimer = null;
@@ -667,7 +647,7 @@
     parentInfoAttempts = 0;
   }
 
-  async function recomputeEnabled() {
+  async function recomputeEnabled(): Promise<void> {
     const { active, parentInfoReady } = await shouldOperateForCurrentChannel();
 
     if (!parentInfoReady && !parentInfoRetryTimer && parentInfoAttempts < PARENT_INFO_MAX_ATTEMPTS) {
@@ -698,18 +678,15 @@
         }
       });
     }
-    // When disabling, we leave the existing rootObserver in place but
-    // handleNode/maybeWarmup short-circuit on `enabled === false`. Already
-    // pending placeholders are allowed to resolve.
   }
 
-  function clamp(v, lo, hi) {
+  function clamp(v: number, lo: number, hi: number): number {
     return Math.min(hi, Math.max(lo, v));
   }
 
-  function recomputeSettings() {
+  function recomputeSettings(): void {
     chrome.storage.local.get(SETTINGS_KEY, (data) => {
-      const s = (data && data[SETTINGS_KEY]) || {};
+      const s = (data && (data[SETTINGS_KEY] as Partial<Settings> | undefined)) || {};
 
       const wantedWin = typeof s.batchWindowMs === "number" ? s.batchWindowMs : DEFAULT_BATCH_WINDOW_MS;
       const nextWin = clamp(wantedWin, MIN_BATCH_WINDOW_MS, MAX_BATCH_WINDOW_MS);
@@ -733,14 +710,11 @@
     if (changes[SETTINGS_KEY])  recomputeSettings();
   });
 
-  function init() {
+  function init(): void {
     recomputeSettings();
     recomputeEnabled();
   }
 
-  // Flush cache to storage when the page is about to unload, and stop the
-  // parent-info retry loop so it doesn't keep firing after the iframe goes
-  // away during YouTube SPA navigation.
   window.addEventListener("pagehide", () => {
     if (cacheFlushTimer) {
       clearTimeout(cacheFlushTimer);

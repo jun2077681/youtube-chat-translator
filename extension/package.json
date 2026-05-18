@@ -1,0 +1,17 @@
+{
+  "name": "ylct-extension",
+  "version": "0.9.0",
+  "private": true,
+  "description": "YouTube Live Chat Translator — Chrome extension (TypeScript)",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}
