@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            extension/package-lock.json
+            native-host/package-lock.json
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build extension
+        working-directory: extension
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build native host
+        working-directory: native-host
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage release tree
+        run: |
+          mkdir -p staging/ylct-${{ steps.ver.outputs.version }}/extension
+          mkdir -p staging/ylct-${{ steps.ver.outputs.version }}/native-host/dist
+
+          cp -r extension/dist/. staging/ylct-${{ steps.ver.outputs.version }}/extension/
+          cp -r native-host/dist/. staging/ylct-${{ steps.ver.outputs.version }}/native-host/dist/
+          cp native-host/install.ps1 staging/ylct-${{ steps.ver.outputs.version }}/native-host/
+          cp native-host/manifest.json staging/ylct-${{ steps.ver.outputs.version }}/native-host/
+          cp README.md staging/ylct-${{ steps.ver.outputs.version }}/
+
+      - name: Zip combined bundle
+        working-directory: staging
+        run: zip -r ../ylct-${{ steps.ver.outputs.version }}.zip ylct-${{ steps.ver.outputs.version }}
+
+      - name: Zip extension-only (Chrome unpacked load convenience)
+        working-directory: extension/dist
+        run: zip -r ../../ylct-extension-${{ steps.ver.outputs.version }}.zip .
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ylct-${{ steps.ver.outputs.version }}.zip
+            ylct-extension-${{ steps.ver.outputs.version }}.zip
