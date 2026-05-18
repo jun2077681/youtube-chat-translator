@@ -1,23 +1,31 @@
 // Wrapper around `claude -p` (Claude Code CLI in non-interactive print mode).
 // One-shot spawn per call. Used as a fallback when YLCT_SESSION_MODE=0;
-// the default path is the long-running session in claude-session.js.
+// the default path is the long-running session in claude-session.ts.
 
-"use strict";
+import { spawn, type ChildProcess } from "node:child_process";
+import os from "node:os";
 
-const { spawn } = require("child_process");
-const os = require("os");
+export const DEFAULT_CMD: string = process.env.YLCT_CLAUDE_PATH || "claude";
+export const DEFAULT_TIMEOUT_MS = 30_000;
 
-const DEFAULT_CMD = process.env.YLCT_CLAUDE_PATH || "claude";
-const DEFAULT_TIMEOUT_MS = 30_000;
+export interface RunOptions {
+  cmd?: string;
+  timeoutMs?: number;
+  extraArgs?: string[];
+}
 
-function runClaudePrompt(prompt, opts = {}) {
+export type RunResult =
+  | { ok: true; text: string }
+  | { ok: false; error: string; code: number; stderr: string };
+
+export function runClaudePrompt(prompt: string, opts: RunOptions = {}): Promise<RunResult> {
   const cmd = opts.cmd || DEFAULT_CMD;
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
   const extraArgs = opts.extraArgs || [];
 
   return new Promise((resolve) => {
     const args = ["-p", ...extraArgs];
-    let proc;
+    let proc: ChildProcess;
     try {
       proc = spawn(cmd, args, {
         shell: process.platform === "win32",
@@ -25,7 +33,7 @@ function runClaudePrompt(prompt, opts = {}) {
         windowsHide: true,
       });
     } catch (err) {
-      resolve({ ok: false, error: `spawn failed: ${err.message}`, code: -1, stderr: "" });
+      resolve({ ok: false, error: `spawn failed: ${(err as Error).message}`, code: -1, stderr: "" });
       return;
     }
 
@@ -33,11 +41,11 @@ function runClaudePrompt(prompt, opts = {}) {
     let stderr = "";
     let finished = false;
 
-    const finish = (result) => {
+    const finish = (result: RunResult): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      try { proc.kill("SIGKILL"); } catch (_) {}
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
       resolve(result);
     };
 
@@ -45,10 +53,10 @@ function runClaudePrompt(prompt, opts = {}) {
       finish({ ok: false, error: `timeout after ${timeoutMs}ms`, code: -1, stderr });
     }, timeoutMs);
 
-    proc.stdout.setEncoding("utf8");
-    proc.stderr.setEncoding("utf8");
-    proc.stdout.on("data", (chunk) => { stdout += chunk; });
-    proc.stderr.on("data", (chunk) => { stderr += chunk; });
+    proc.stdout?.setEncoding("utf8");
+    proc.stderr?.setEncoding("utf8");
+    proc.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    proc.stderr?.on("data", (chunk: string) => { stderr += chunk; });
 
     proc.on("error", (err) => {
       finish({ ok: false, error: `process error: ${err.message}`, code: -1, stderr });
@@ -68,11 +76,9 @@ function runClaudePrompt(prompt, opts = {}) {
     });
 
     try {
-      proc.stdin.end(prompt + os.EOL);
+      proc.stdin?.end(prompt + os.EOL);
     } catch (err) {
-      finish({ ok: false, error: `stdin write failed: ${err.message}`, code: -1, stderr });
+      finish({ ok: false, error: `stdin write failed: ${(err as Error).message}`, code: -1, stderr });
     }
   });
 }
-
-module.exports = { runClaudePrompt, DEFAULT_CMD, DEFAULT_TIMEOUT_MS };

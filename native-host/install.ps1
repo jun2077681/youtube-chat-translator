@@ -24,11 +24,11 @@ if ($ExtensionId -notmatch '^[a-p]{32}$') {
 
 $HostName = "com.ylct.translator"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$HostJs = Join-Path $ScriptDir "host.js"
+$HostJs = Join-Path $ScriptDir "dist\host.js"
 $HostBat = Join-Path $ScriptDir "host.bat"
 $ManifestPath = Join-Path $ScriptDir "manifest.json"
 
-if (-not (Test-Path $HostJs))      { Write-Error "host.js not found at $HostJs" }
+if (-not (Test-Path $HostJs))      { Write-Error "dist\host.js not found at $HostJs. Run 'npm install && npm run build' first." }
 if (-not (Test-Path $ManifestPath)) { Write-Error "manifest.json not found at $ManifestPath" }
 
 $NodeCmd = Get-Command node -ErrorAction SilentlyContinue
@@ -39,7 +39,7 @@ Write-Host "[ok] Node.js found: $($NodeCmd.Source)"
 
 $BatContent = @"
 @echo off
-node "%~dp0host.js" %*
+node "%~dp0dist\host.js" %*
 "@
 Set-Content -Path $HostBat -Value $BatContent -Encoding ASCII
 Write-Host "[ok] Wrote $HostBat"
