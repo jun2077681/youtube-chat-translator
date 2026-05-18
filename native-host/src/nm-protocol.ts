@@ -2,14 +2,14 @@
 // Frame: [uint32 little-endian length][UTF-8 JSON body].
 // Spec: https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging
 
-"use strict";
+import type { Readable, Writable } from "node:stream";
 
-const MAX_MESSAGE_SIZE = 1024 * 1024; // 1 MiB safety cap.
+export const MAX_MESSAGE_SIZE = 1024 * 1024;
 
-async function* readMessages(stream) {
+export async function* readMessages(stream: Readable): AsyncGenerator<unknown, void, void> {
   let buffer = Buffer.alloc(0);
 
-  for await (const chunk of stream) {
+  for await (const chunk of stream as AsyncIterable<Buffer>) {
     buffer = Buffer.concat([buffer, chunk]);
 
     while (buffer.length >= 4) {
@@ -22,18 +22,18 @@ async function* readMessages(stream) {
       const body = buffer.slice(4, 4 + length).toString("utf8");
       buffer = buffer.slice(4 + length);
 
-      let parsed;
+      let parsed: unknown;
       try {
         parsed = JSON.parse(body);
       } catch (err) {
-        throw new Error(`Invalid JSON from extension: ${err.message}`);
+        throw new Error(`Invalid JSON from extension: ${(err as Error).message}`);
       }
       yield parsed;
     }
   }
 }
 
-function writeMessage(stream, obj) {
+export function writeMessage(stream: Writable, obj: unknown): void {
   const body = Buffer.from(JSON.stringify(obj), "utf8");
   if (body.length > MAX_MESSAGE_SIZE) {
     throw new Error(`Outgoing message too large: ${body.length} bytes`);
@@ -43,5 +43,3 @@ function writeMessage(stream, obj) {
   stream.write(header);
   stream.write(body);
 }
-
-module.exports = { readMessages, writeMessage, MAX_MESSAGE_SIZE };
