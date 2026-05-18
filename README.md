@@ -42,15 +42,19 @@ npm run typecheck
 1. Chrome `chrome://extensions` 접속
 2. **개발자 모드 ON**
 3. **압축해제된 확장 프로그램 로드** → `youtube-chat-translator/extension/dist/` 폴더 선택 (소스 디렉토리 아닌 **dist**)
-4. 로드된 확장의 **ID(32자리 a-p)**를 복사
+4. 확장 ID는 `manifest.json:key`에 의해 **`glcmldcajgllcmlldojlbhdkaficlheo`로 고정**됩니다 — 로드 경로/머신과 무관하게 동일. 별도로 복사할 필요 없음.
 
-### 3. Native Host 등록 (관리자 권한 불필요)
+### 3. Native Host 빌드 + 등록 (관리자 권한 불필요)
 PowerShell에서:
 
 ```powershell
 cd D:\path\to\youtube-chat-translator\native-host
-powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+npm install
+npm run build
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+
+`install.ps1`은 확장 ID를 기본값으로 사용합니다 (고정 ID). 다른 ID를 사용해야 하면 `-ExtensionId <ID>` 옵션 추가.
 
 성공 시 출력:
 ```
@@ -60,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId aaaaaaaaaaaaaa
 [ok] Registered HKCU:\...\com.ylct.translator -> ...
 ```
 
-### 4. 채널 화이트리스트 등록
+### 4. 채널 화이트리스트 등록 (필수)
 **중요**: 화이트리스트가 비어있으면 **번역이 동작하지 않습니다**. 사용할 채널을 등록해야 합니다.
 
 1. 등록할 YouTube 라이브 영상 페이지(`/watch?v=...`) 열기
@@ -181,6 +185,26 @@ youtube-chat-translator/
 
 ---
 
+## 확장 서명 키 (개발자용)
+
+확장 ID는 `extension/manifest.json:key` 필드의 RSA 공개키로부터 결정론적으로 파생됩니다. 따라서 로드 경로/머신과 무관하게 항상 동일한 ID(`glcmldcajgllcmlldojlbhdkaficlheo`)가 사용됩니다. `install.ps1`도 이 ID를 기본값으로 사용하므로 인자 전달이 필요 없습니다.
+
+**개인키 (`extension-private.pem`)는 본 저장소에 포함되지 않습니다** (gitignore). 다음 경우에만 필요합니다:
+
+- 추후 Chrome Web Store에 본 확장을 업로드할 때 (Web Store가 동일 ID로 listing을 식별)
+- 다른 머신에서 같은 ID로 unpacked 로드만 할 거면 **개인키는 불필요** — `manifest.json:key`만 있으면 ID는 같음
+
+키를 재생성하려면 (ID가 바뀌므로 권장하지 않음):
+
+```powershell
+cd extension
+node scripts/generate-key.mjs
+```
+
+출력된 공개키를 `manifest.json:key`에, 새 ID를 `native-host/manifest.json:allowed_origins` + `install.ps1`의 기본값에 반영해야 합니다.
+
+---
+
 ## 트러블슈팅
 
 ### 번역이 표시되지 않음
@@ -257,7 +281,7 @@ system 환경 또는 `host.bat`에 설정 가능:
 | 키 | 스키마 |
 |----|--------|
 | `ylct:cache:v1` | `{version: 1, entries: [[정규화원문, 번역], ...]}` (LRU 순서, 최대 2000개) |
-| `ylct:whitelist:v1` | `[{channelId, channelName, addedAt(ISO 8601)}]` |
+| `ylct:whitelist:v2` | `[{handle, channelName, addedAt(ISO 8601)}]` (handle은 `@xxx` 형식) |
 | `ylct:settings:v1` | `{batchWindowMs: number, maxTurns: number}` |
 
 ---
