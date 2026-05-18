@@ -3,7 +3,8 @@
   "name": "YouTube Live Chat Translator",
   "version": "0.9.0",
   "description": "Translates YouTube live-chat between Japanese and Korean via the Claude Code CLI. Per-channel whitelist; no API key required.",
-  "permissions": ["nativeMessaging", "storage"],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk4Kxme6/ueXoQnPqMIYzxXhBqaCYyyBiUdyftCkmhKCozV8gTLX6uC1blVbWybcCd+LmsdTSIa4pVntPe9X+QBj1lWCa4NytupxWOhCNl2imJOgTMZHNQZd+O16fVuSOHIvL2BdeS2bJliWAuRwjNlJ0UOkv+5ZPC38LMMaVPXYtIVXg68VXIbOFNcf1Nss8rkYMrOYo2ytQ0yyLxjbx2M78P1hVRSXRAS6VGyH3uSrS7HcvNJFu0w4eL2U1JRYMybhuOBYzff+aLsddEuiUAoMdx0VSYjz65S0GP9m39JDrgD8MQ33yXKEjLCcswlTGfdD65eE2QPcouNeceeRTnQIDAQAB",
+  "permissions": ["nativeMessaging", "storage", "activeTab", "scripting"],
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -11,11 +12,11 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "service_worker": "src/background/background.js",
+    "service_worker": "background.js",
     "type": "module"
   },
   "action": {
-    "default_popup": "src/popup/popup.html",
+    "default_popup": "popup.html",
     "default_title": "YLCT — YouTube live chat translator",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -28,19 +29,17 @@
     {
       "matches": ["https://www.youtube.com/live_chat*"],
       "js": [
-        "src/shared/constants.js",
-        "src/content/content.js",
-        "src/content/input-translator.js"
+        "content.js",
+        "input-translator.js"
       ],
-      "css": ["src/content/content.css"],
+      "css": ["content.css"],
       "run_at": "document_idle",
       "all_frames": true
     },
     {
       "matches": ["https://www.youtube.com/watch*"],
       "js": [
-        "src/shared/constants.js",
-        "src/content/channel-detector.js"
+        "channel-detector.js"
       ],
       "run_at": "document_idle"
     }

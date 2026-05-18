@@ -1,17 +1,29 @@
 // YLCT popup: main tab (channel whitelist) + debug tab (native host probes).
 
-const { MSG, KEY, SETTINGS_DEFAULTS } = globalThis.YLCT_CONST;
+import {
+  KEY,
+  MSG,
+  SETTINGS_DEFAULTS,
+  type ChannelInfo,
+  type Settings,
+  type WhitelistEntry,
+} from "../shared/constants";
+
 const WHITELIST_KEY = KEY.WHITELIST;
 const SETTINGS_KEY = KEY.SETTINGS;
 
-// ---------- tabs ----------
+function $(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`missing element: #${id}`);
+  return el;
+}
 
-const tabMain = document.getElementById("tab-main");
-const tabDebug = document.getElementById("tab-debug");
-const paneMain = document.getElementById("pane-main");
-const paneDebug = document.getElementById("pane-debug");
+const tabMain = $("tab-main");
+const tabDebug = $("tab-debug");
+const paneMain = $("pane-main");
+const paneDebug = $("pane-debug");
 
-function activateTab(which) {
+function activateTab(which: "main" | "debug"): void {
   const isMain = which === "main";
   tabMain.classList.toggle("active", isMain);
   tabDebug.classList.toggle("active", !isMain);
@@ -21,39 +33,37 @@ function activateTab(which) {
 tabMain.addEventListener("click", () => activateTab("main"));
 tabDebug.addEventListener("click", () => activateTab("debug"));
 
-// ---------- main tab ----------
+const currentChannelName = $("current-channel-name");
+const currentChannelId = $("current-channel-id");
+const addChannelBtn = $("add-channel-btn") as HTMLButtonElement;
+const whitelistList = $("whitelist-list");
 
-const currentChannelName = document.getElementById("current-channel-name");
-const currentChannelId = document.getElementById("current-channel-id");
-const addChannelBtn = document.getElementById("add-channel-btn");
-const whitelistList = document.getElementById("whitelist-list");
+let detectedChannel: ChannelInfo | null = null;
 
-let detectedChannel = null;
-
-function loadWhitelist() {
+function loadWhitelist(): Promise<WhitelistEntry[]> {
   return new Promise((resolve) => {
     chrome.storage.local.get(WHITELIST_KEY, (data) => {
-      const list = data && data[WHITELIST_KEY];
+      const list = data && (data[WHITELIST_KEY] as WhitelistEntry[] | undefined);
       resolve(Array.isArray(list) ? list : []);
     });
   });
 }
 
-function saveWhitelist(list) {
+function saveWhitelist(list: WhitelistEntry[]): Promise<void> {
   return new Promise((resolve) => {
     chrome.storage.local.set({ [WHITELIST_KEY]: list }, () => resolve());
   });
 }
 
-async function addCurrent() {
-  if (!detectedChannel || !detectedChannel.channelId) return;
+async function addCurrent(): Promise<void> {
+  if (!detectedChannel || !detectedChannel.handle) return;
   const list = await loadWhitelist();
-  if (list.some((e) => e.channelId === detectedChannel.channelId)) return;
-  const updated = [
+  if (list.some((e) => e.handle === detectedChannel!.handle)) return;
+  const updated: WhitelistEntry[] = [
     ...list,
     {
-      channelId: detectedChannel.channelId,
-      channelName: detectedChannel.channelName || detectedChannel.channelId,
+      handle: detectedChannel.handle,
+      channelName: detectedChannel.channelName || detectedChannel.handle,
       addedAt: new Date().toISOString(),
     },
   ];
@@ -62,15 +72,15 @@ async function addCurrent() {
   await refreshAddButton();
 }
 
-async function removeChannel(channelId) {
+async function removeChannel(handle: string): Promise<void> {
   const list = await loadWhitelist();
-  const filtered = list.filter((e) => e.channelId !== channelId);
+  const filtered = list.filter((e) => e.handle !== handle);
   await saveWhitelist(filtered);
   await renderWhitelist();
   await refreshAddButton();
 }
 
-async function renderWhitelist() {
+async function renderWhitelist(): Promise<void> {
   const list = await loadWhitelist();
   whitelistList.innerHTML = "";
   if (list.length === 0) {
@@ -84,25 +94,25 @@ async function renderWhitelist() {
     const li = document.createElement("li");
     const name = document.createElement("span");
     name.className = "name";
-    name.textContent = entry.channelName || entry.channelId;
-    name.title = entry.channelId;
+    name.textContent = entry.channelName || entry.handle;
+    name.title = entry.handle;
     const btn = document.createElement("button");
     btn.textContent = "제거";
-    btn.addEventListener("click", () => removeChannel(entry.channelId));
+    btn.addEventListener("click", () => removeChannel(entry.handle));
     li.appendChild(name);
     li.appendChild(btn);
     whitelistList.appendChild(li);
   }
 }
 
-async function refreshAddButton() {
-  if (!detectedChannel || !detectedChannel.channelId) {
+async function refreshAddButton(): Promise<void> {
+  if (!detectedChannel || !detectedChannel.handle) {
     addChannelBtn.disabled = true;
     addChannelBtn.textContent = "현재 채널을 감지할 수 없음";
     return;
   }
   const list = await loadWhitelist();
-  const already = list.some((e) => e.channelId === detectedChannel.channelId);
+  const already = list.some((e) => e.handle === detectedChannel!.handle);
   addChannelBtn.disabled = already;
   addChannelBtn.textContent = already
     ? "이미 화이트리스트에 있음"
@@ -111,31 +121,56 @@ async function refreshAddButton() {
 
 addChannelBtn.addEventListener("click", addCurrent);
 
-async function detectCurrentChannel() {
+function sendChannelInfoMessage(tabId: number): Promise<ChannelInfo | null> {
   return new Promise((resolve) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs && tabs[0];
-      if (!tab || !tab.id) { resolve(null); return; }
-      chrome.tabs.sendMessage(tab.id, { type: MSG.GET_CHANNEL_INFO }, (reply) => {
-        if (chrome.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-        resolve(reply || null);
-      });
+    chrome.tabs.sendMessage(tabId, { type: MSG.GET_CHANNEL_INFO }, (reply: ChannelInfo | undefined) => {
+      if (chrome.runtime.lastError) { resolve(null); return; }
+      resolve(reply || null);
     });
   });
 }
 
-function loadSettings() {
+async function injectChannelDetector(tabId: number): Promise<boolean> {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ["channel-detector.js"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectCurrentChannel(): Promise<ChannelInfo | null> {
+  const [tab] = await new Promise<chrome.tabs.Tab[]>((res) =>
+    chrome.tabs.query({ active: true, currentWindow: true }, res)
+  );
+  if (!tab || !tab.id || !tab.url) return null;
+  if (!/^https:\/\/www\.youtube\.com\/watch/.test(tab.url)) return null;
+
+  let viaMessage = await sendChannelInfoMessage(tab.id);
+  if (viaMessage && viaMessage.handle) return viaMessage;
+
+  if (!(await injectChannelDetector(tab.id))) return null;
+
+  for (const ms of [0, 400, 800, 1200]) {
+    if (ms) await new Promise((r) => setTimeout(r, ms));
+    viaMessage = await sendChannelInfoMessage(tab.id);
+    if (viaMessage && viaMessage.handle) return viaMessage;
+  }
+  return null;
+}
+
+function loadSettings(): Promise<Partial<Settings>> {
   return new Promise((resolve) => {
     chrome.storage.local.get(SETTINGS_KEY, (data) => {
-      resolve((data && data[SETTINGS_KEY]) || {});
+      resolve((data && (data[SETTINGS_KEY] as Partial<Settings> | undefined)) || {});
     });
   });
 }
 
-async function patchSettings(patch) {
+async function patchSettings(patch: Partial<Settings>): Promise<void> {
   const cur = await loadSettings();
   const next = { ...cur, ...patch };
   return new Promise((resolve) => {
@@ -143,11 +178,11 @@ async function patchSettings(patch) {
   });
 }
 
-const batchWindowSelect = document.getElementById("batch-window");
-const maxTurnsSelect = document.getElementById("max-turns");
-const resetSessionBtn = document.getElementById("reset-session-btn");
+const batchWindowSelect = $("batch-window") as HTMLSelectElement;
+const maxTurnsSelect = $("max-turns") as HTMLSelectElement;
+const resetSessionBtn = $("reset-session-btn") as HTMLButtonElement;
 
-async function initSettings() {
+async function initSettings(): Promise<void> {
   const s = await loadSettings();
   batchWindowSelect.value = String(typeof s.batchWindowMs === "number" ? s.batchWindowMs : SETTINGS_DEFAULTS.batchWindowMs);
   maxTurnsSelect.value = String(typeof s.maxTurns === "number" ? s.maxTurns : SETTINGS_DEFAULTS.maxTurns);
@@ -168,14 +203,14 @@ resetSessionBtn.addEventListener("click", async () => {
   resetSessionBtn.disabled = true;
   resetSessionBtn.textContent = "재시작 중...";
   try {
-    const reply = await new Promise((resolve) => {
+    const reply = await new Promise<{ ok?: boolean; error?: string } | undefined>((resolve) => {
       chrome.runtime.sendMessage({ type: MSG.RESET_SESSION }, (r) => {
         if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
         else resolve(r);
       });
     });
     resetSessionBtn.textContent = (reply && reply.ok) ? "재시작됨 ✓" : "실패";
-  } catch (err) {
+  } catch {
     resetSessionBtn.textContent = "오류";
   }
   setTimeout(() => {
@@ -184,11 +219,11 @@ resetSessionBtn.addEventListener("click", async () => {
   }, 1500);
 });
 
-async function initMainTab() {
+async function initMainTab(): Promise<void> {
   detectedChannel = await detectCurrentChannel();
-  if (detectedChannel && detectedChannel.channelId) {
+  if (detectedChannel && detectedChannel.handle) {
     currentChannelName.textContent = detectedChannel.channelName || "(이름 없음)";
-    currentChannelId.textContent = detectedChannel.channelId;
+    currentChannelId.textContent = detectedChannel.handle;
   } else {
     currentChannelName.textContent = "YouTube 라이브 페이지가 아니거나 감지 실패";
     currentChannelId.textContent = "";
@@ -198,18 +233,16 @@ async function initMainTab() {
   await initSettings();
 }
 
-// ---------- debug tab ----------
+const pingBtn = $("ping-btn") as HTMLButtonElement;
+const claudeBtn = $("claude-btn") as HTMLButtonElement;
+const promptInput = $("prompt-input") as HTMLInputElement;
+const output = $("output");
 
-const pingBtn = document.getElementById("ping-btn");
-const claudeBtn = document.getElementById("claude-btn");
-const promptInput = document.getElementById("prompt-input");
-const output = document.getElementById("output");
-
-function setOutput(label, payload) {
+function setOutput(label: string, payload: unknown): void {
   output.textContent = `[${label}] ${new Date().toISOString()}\n` + JSON.stringify(payload, null, 2);
 }
 
-function send(message) {
+function send(message: unknown): Promise<unknown> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) {
@@ -221,7 +254,7 @@ function send(message) {
   });
 }
 
-async function withButton(btn, label, fn) {
+async function withButton(btn: HTMLButtonElement, label: string, fn: () => Promise<unknown>): Promise<void> {
   btn.disabled = true;
   output.textContent = `[${label}] running...`;
   const t0 = performance.now();
@@ -230,7 +263,7 @@ async function withButton(btn, label, fn) {
     const elapsed = Math.round(performance.now() - t0);
     setOutput(`${label} done in ${elapsed}ms`, result);
   } catch (err) {
-    setOutput(`${label} threw`, { error: String(err && err.message || err) });
+    setOutput(`${label} threw`, { error: err instanceof Error ? err.message : String(err) });
   } finally {
     btn.disabled = false;
   }

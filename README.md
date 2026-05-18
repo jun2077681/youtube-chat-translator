@@ -10,6 +10,8 @@ YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`
 
 ## 빠른 시작
 
+> **개발자가 아니라 그냥 쓰고 싶다면**: [Releases 페이지](https://github.com/jun2077681/youtube-chat-translator/releases)에서 최신 `ylct-X.Y.Z.zip` 다운로드 → 압축 해제 → `native-host\install.ps1` 실행 → `chrome://extensions`에서 `extension/` 폴더를 unpacked로 로드. 빌드 단계 생략됩니다. 사전 요구사항 0번(Node.js + Claude CLI)은 여전히 필요합니다.
+
 ### 0. 사전 요구사항
 - Windows 10/11 (현재 install 스크립트는 Windows만 지원)
 - **Node.js 18+** (PATH에 등록)
@@ -17,19 +19,44 @@ YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`
   - 설치 확인: 터미널에서 `claude -p "안녕"` 실행 → 응답이 오면 OK
 - **Google Chrome**
 
-### 1. 확장 로드
+### 1. 확장 빌드
+extension은 TypeScript로 작성되며 esbuild로 번들합니다. 최초 1회 + 소스 변경 시마다 빌드 필요.
+
+```powershell
+cd D:\path\to\youtube-chat-translator\extension
+npm install
+npm run build
+```
+
+산출물은 `extension/dist/`에 생성됩니다.
+
+개발 중 자동 재빌드:
+```powershell
+npm run watch
+```
+
+타입 검사만:
+```powershell
+npm run typecheck
+```
+
+### 2. 확장 로드
 1. Chrome `chrome://extensions` 접속
 2. **개발자 모드 ON**
-3. **압축해제된 확장 프로그램 로드** → `youtube-chat-translator/extension/` 폴더 선택
-4. 로드된 확장의 **ID(32자리 a-p)**를 복사
+3. **압축해제된 확장 프로그램 로드** → `youtube-chat-translator/extension/dist/` 폴더 선택 (소스 디렉토리 아닌 **dist**)
+4. 확장 ID는 `manifest.json:key`에 의해 **`glcmldcajgllcmlldojlbhdkaficlheo`로 고정**됩니다 — 로드 경로/머신과 무관하게 동일. 별도로 복사할 필요 없음.
 
-### 2. Native Host 등록 (관리자 권한 불필요)
+### 3. Native Host 빌드 + 등록 (관리자 권한 불필요)
 PowerShell에서:
 
 ```powershell
 cd D:\path\to\youtube-chat-translator\native-host
-powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+npm install
+npm run build
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+
+`install.ps1`은 확장 ID를 기본값으로 사용합니다 (고정 ID). 다른 ID를 사용해야 하면 `-ExtensionId <ID>` 옵션 추가.
 
 성공 시 출력:
 ```
@@ -39,7 +66,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -ExtensionId aaaaaaaaaaaaaa
 [ok] Registered HKCU:\...\com.ylct.translator -> ...
 ```
 
-### 3. 채널 화이트리스트 등록
+### 4. 채널 화이트리스트 등록 (필수)
 **중요**: 화이트리스트가 비어있으면 **번역이 동작하지 않습니다**. 사용할 채널을 등록해야 합니다.
 
 1. 등록할 YouTube 라이브 영상 페이지(`/watch?v=...`) 열기
@@ -129,19 +156,25 @@ youtube-chat-translator/
 ├── docs/
 │   ├── DESIGN.md              # 아키텍처/설계
 │   └── CHANGELOG.md           # 마일스톤 변경 이력
-├── extension/                 # Chrome 확장 (MV3)
-│   ├── manifest.json
+├── extension/                 # Chrome 확장 (MV3, TypeScript)
+│   ├── manifest.json          # dist에 복사됨; 평면 경로 사용 (e.g. "background.js")
+│   ├── package.json           # esbuild, typescript, @types/chrome
+│   ├── tsconfig.json          # strict 모드
+│   ├── build.mjs              # esbuild 번들러 (entry별 IIFE)
+│   ├── dist/                  # 빌드 산출물 (gitignore, Chrome 로드 대상)
 │   └── src/
+│       ├── shared/
+│       │   └── constants.ts   # ESM 공유 상수/타입 (MSG, KEY, ChannelInfo 등)
 │       ├── background/
-│       │   └── background.js  # service worker, native bridge
+│       │   └── background.ts  # service worker, native bridge
 │       ├── content/
-│       │   ├── content.js          # 채팅 감지 + 배치 + DOM 주입 (live_chat iframe)
-│       │   ├── input-translator.js # KO→JA 입력 미리보기 (live_chat iframe)
-│       │   ├── channel-detector.js # 채널 정보 추출 (/watch 페이지)
+│       │   ├── content.ts          # 채팅 감지 + 배치 + DOM 주입 (live_chat iframe)
+│       │   ├── input-translator.ts # KO→JA 입력 미리보기 (live_chat iframe)
+│       │   ├── channel-detector.ts # 채널 정보 추출 (/watch 페이지)
 │       │   └── content.css
 │       └── popup/
-│           ├── popup.html     # 메인/디버그 탭
-│           └── popup.js
+│           ├── popup.html     # 메인/디버그 탭 (dist에 복사됨)
+│           └── popup.ts
 └── native-host/               # Native Messaging Host (Node.js)
     ├── host.js                # 진입점
     ├── nm-protocol.js         # 4-byte length wire protocol
@@ -151,6 +184,26 @@ youtube-chat-translator/
     ├── install.ps1            # Windows 등록 스크립트
     └── package.json
 ```
+
+---
+
+## 확장 서명 키 (개발자용)
+
+확장 ID는 `extension/manifest.json:key` 필드의 RSA 공개키로부터 결정론적으로 파생됩니다. 따라서 로드 경로/머신과 무관하게 항상 동일한 ID(`glcmldcajgllcmlldojlbhdkaficlheo`)가 사용됩니다. `install.ps1`도 이 ID를 기본값으로 사용하므로 인자 전달이 필요 없습니다.
+
+**개인키 (`extension-private.pem`)는 본 저장소에 포함되지 않습니다** (gitignore). 다음 경우에만 필요합니다:
+
+- 추후 Chrome Web Store에 본 확장을 업로드할 때 (Web Store가 동일 ID로 listing을 식별)
+- 다른 머신에서 같은 ID로 unpacked 로드만 할 거면 **개인키는 불필요** — `manifest.json:key`만 있으면 ID는 같음
+
+키를 재생성하려면 (ID가 바뀌므로 권장하지 않음):
+
+```powershell
+cd extension
+node scripts/generate-key.mjs
+```
+
+출력된 공개키를 `manifest.json:key`에, 새 ID를 `native-host/manifest.json:allowed_origins` + `install.ps1`의 기본값에 반영해야 합니다.
 
 ---
 
@@ -230,7 +283,7 @@ system 환경 또는 `host.bat`에 설정 가능:
 | 키 | 스키마 |
 |----|--------|
 | `ylct:cache:v1` | `{version: 1, entries: [[정규화원문, 번역], ...]}` (LRU 순서, 최대 2000개) |
-| `ylct:whitelist:v1` | `[{channelId, channelName, addedAt(ISO 8601)}]` |
+| `ylct:whitelist:v2` | `[{handle, channelName, addedAt(ISO 8601)}]` (handle은 `@xxx` 형식) |
 | `ylct:settings:v1` | `{batchWindowMs: number, maxTurns: number}` |
 
 ---

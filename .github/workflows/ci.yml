@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  build:
+    name: typecheck + build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: |
+            extension/package-lock.json
+            native-host/package-lock.json
+
+      # ---------- extension ----------
+
+      - name: Extension - install
+        working-directory: extension
+        run: npm ci
+
+      - name: Extension - typecheck
+        working-directory: extension
+        run: npm run typecheck
+
+      - name: Extension - build
+        working-directory: extension
+        run: npm run build
+
+      # ---------- native host ----------
+
+      - name: Native host - install
+        working-directory: native-host
+        run: npm ci
+
+      - name: Native host - typecheck
+        working-directory: native-host
+        run: npm run typecheck
+
+      - name: Native host - build
+        working-directory: native-host
+        run: npm run build

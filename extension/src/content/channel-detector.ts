@@ -2,18 +2,22 @@
 // Sole purpose: respond to popup's GET_CHANNEL_INFO query so the user can
 // add the current channel to the whitelist.
 
-(() => {
-  "use strict";
+import { MSG, readChannelInfoFromDocument } from "../shared/constants";
 
+declare global {
+  interface Window {
+    __ylctChannelDetectorLoaded?: boolean;
+  }
+}
+
+(() => {
   if (window.__ylctChannelDetectorLoaded) return;
   window.__ylctChannelDetectorLoaded = true;
 
-  const { MSG, readChannelInfoFromDocument } = globalThis.YLCT_CONST;
-
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg: { type?: string }, _sender, sendResponse) => {
     if (msg && msg.type === MSG.GET_CHANNEL_INFO) {
       const info = readChannelInfoFromDocument(document);
-      sendResponse(info || { channelId: null, channelName: null });
+      sendResponse(info || { handle: null, channelName: null });
       return false;
     }
     return false;
