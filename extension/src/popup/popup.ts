@@ -55,29 +55,30 @@ function saveWhitelist(list: WhitelistEntry[]): Promise<void> {
   });
 }
 
+async function refreshWhitelistUI(): Promise<void> {
+  await renderWhitelist();
+  await refreshAddButton();
+}
+
 async function addCurrent(): Promise<void> {
   if (!detectedChannel || !detectedChannel.handle) return;
   const list = await loadWhitelist();
   if (list.some((e) => e.handle === detectedChannel!.handle)) return;
-  const updated: WhitelistEntry[] = [
+  await saveWhitelist([
     ...list,
     {
       handle: detectedChannel.handle,
       channelName: detectedChannel.channelName || detectedChannel.handle,
       addedAt: new Date().toISOString(),
     },
-  ];
-  await saveWhitelist(updated);
-  await renderWhitelist();
-  await refreshAddButton();
+  ]);
+  await refreshWhitelistUI();
 }
 
 async function removeChannel(handle: string): Promise<void> {
   const list = await loadWhitelist();
-  const filtered = list.filter((e) => e.handle !== handle);
-  await saveWhitelist(filtered);
-  await renderWhitelist();
-  await refreshAddButton();
+  await saveWhitelist(list.filter((e) => e.handle !== handle));
+  await refreshWhitelistUI();
 }
 
 async function renderWhitelist(): Promise<void> {
