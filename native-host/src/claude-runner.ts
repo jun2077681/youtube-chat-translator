@@ -2,11 +2,22 @@
 // One-shot spawn per call. Used as a fallback when YLCT_SESSION_MODE=0;
 // the default path is the long-running session in claude-session.ts.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import os from "node:os";
+import path from "node:path";
 
 export const DEFAULT_CMD: string = process.env.YLCT_CLAUDE_PATH || "claude";
 export const DEFAULT_TIMEOUT_MS = 30_000;
+
+function killTree(proc: ChildProcess): void {
+  const pid = proc.pid;
+  if (!pid) { try { proc.kill(); } catch { /* ignore */ } return; }
+  if (process.platform === "win32") {
+    try { execSync(`taskkill /pid ${pid} /T /F`, { stdio: "ignore" }); } catch { /* ignore */ }
+  } else {
+    try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+  }
+}
 
 export interface RunOptions {
   cmd?: string;
@@ -24,7 +35,8 @@ export function runClaudePrompt(prompt: string, opts: RunOptions = {}): Promise<
   const extraArgs = opts.extraArgs || [];
 
   return new Promise((resolve) => {
-    const args = ["-p", ...extraArgs];
+    const mcpConfigPath = path.resolve(__dirname, "../mcp-empty.json");
+    const args = ["-p", "--mcp-config", mcpConfigPath, "--strict-mcp-config", ...extraArgs];
     let proc: ChildProcess;
     try {
       proc = spawn(cmd, args, {
@@ -45,7 +57,7 @@ export function runClaudePrompt(prompt: string, opts: RunOptions = {}): Promise<
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      killTree(proc);
       resolve(result);
     };
 
