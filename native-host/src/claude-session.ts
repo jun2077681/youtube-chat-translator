@@ -1,7 +1,8 @@
 // Long-running `claude --print --input-format stream-json --output-format stream-json` session.
 // Spawn once, send many user messages. Avoids cold start per request.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
+import path from "node:path";
 
 const DEFAULT_CMD: string = process.env.YLCT_CLAUDE_PATH || "claude";
 const DEFAULT_MODEL: string = process.env.YLCT_MODEL || "haiku";
@@ -64,6 +65,16 @@ function log(...args: unknown[]): void {
   process.stderr.write("[ylct-session] " + args.map(String).join(" ") + "\n");
 }
 
+function killTree(proc: ChildProcess): void {
+  const pid = proc.pid;
+  if (!pid) { try { proc.kill(); } catch { /* ignore */ } return; }
+  if (process.platform === "win32") {
+    try { execSync(`taskkill /pid ${pid} /T /F`, { stdio: "ignore" }); } catch { /* ignore */ }
+  } else {
+    try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+  }
+}
+
 interface QueueItem {
   content: string;
   direction: Direction;
@@ -89,6 +100,7 @@ export class ClaudeSession {
 
   spawnProc(): void {
     log("spawning claude session");
+    const mcpConfigPath = path.resolve(__dirname, "../mcp-empty.json");
     const args = [
       "--print",
       "--input-format", "stream-json",
@@ -97,6 +109,8 @@ export class ClaudeSession {
       "--system-prompt", SYSTEM_PROMPT,
       "--json-schema", OUTPUT_SCHEMA,
       "--tools", "",
+      "--mcp-config", mcpConfigPath,
+      "--strict-mcp-config",
       "--disable-slash-commands",
       "--model", DEFAULT_MODEL,
       "--effort", "low",
@@ -135,9 +149,11 @@ export class ClaudeSession {
 
   private handleDeath(reason: string): void {
     const wasBusy = this.busy;
+    const proc = this.proc;
     this.proc = null;
     this.buffer = "";
     this.busy = null;
+    if (proc) killTree(proc);
     if (wasBusy) {
       if (wasBusy.timer) clearTimeout(wasBusy.timer);
       wasBusy.reject(new Error("session died: " + reason));
@@ -203,7 +219,7 @@ export class ClaudeSession {
     item.timer = setTimeout(() => {
       log("request timed out after " + REQUEST_TIMEOUT_MS + "ms, killing session");
       this.busy = null;
-      try { this.proc?.kill("SIGKILL"); } catch { /* ignore */ }
+      if (this.proc) killTree(this.proc);
       item.reject(new Error("session request timeout"));
     }, REQUEST_TIMEOUT_MS);
 
@@ -244,7 +260,7 @@ export class ClaudeSession {
       try { this.proc.stdout?.removeAllListeners(); } catch { /* ignore */ }
       try { this.proc.stderr?.removeAllListeners(); } catch { /* ignore */ }
       try { this.proc.stdin?.end(); } catch { /* ignore */ }
-      try { this.proc.kill(); } catch { /* ignore */ }
+      killTree(this.proc);
       this.proc = null;
       this.buffer = "";
       this.turnCount = 0;
