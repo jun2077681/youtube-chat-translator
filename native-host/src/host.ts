@@ -42,66 +42,43 @@ async function handleMessage(msg: InboundMessage | null | undefined): Promise<Re
   const startedAt = Date.now();
 
   if (!id || typeof id !== "string") {
-    return { id: id || "<unknown>", ok: false, error: "missing id", elapsedMs: 0 };
+    return { id: "<unknown>", ok: false, error: "missing id", elapsedMs: 0 };
   }
 
+  const elapsed = (): number => Date.now() - startedAt;
+  const ok = (extra: Partial<Response> = {}): Response => ({ id, ok: true, elapsedMs: elapsed(), ...extra });
+  const fail = (error: string, extra: Partial<Response> = {}): Response => ({ id, ok: false, error, elapsedMs: elapsed(), ...extra });
+
   try {
-    if (type === "ping") {
-      return { id, ok: true, text: "pong", elapsedMs: Date.now() - startedAt };
-    }
+    if (type === "ping") return ok({ text: "pong" });
 
     if (type === "reset_session") {
-      try {
-        getSession().manualRestart();
-        return { id, ok: true, elapsedMs: Date.now() - startedAt };
-      } catch (err) {
-        return { id, ok: false, error: errMsg(err), elapsedMs: Date.now() - startedAt };
-      }
+      getSession().manualRestart();
+      return ok();
     }
 
     if (type === "translate") {
       const prompt = msg!.prompt;
-      if (typeof prompt !== "string" || prompt.length === 0) {
-        return { id, ok: false, error: "empty prompt", elapsedMs: Date.now() - startedAt };
-      }
+      if (typeof prompt !== "string" || prompt.length === 0) return fail("empty prompt");
 
       if (SESSION_MODE) {
+        const direction = msg!.direction === "ko_to_ja" ? "ko_to_ja" : "ja_to_ko";
+        const maxTurns = typeof msg!.maxTurns === "number" ? msg!.maxTurns : 0;
         try {
-          const direction = msg!.direction === "ko_to_ja" ? "ko_to_ja" : "ja_to_ko";
-          const maxTurns = typeof msg!.maxTurns === "number" ? msg!.maxTurns : 0;
           const text = await getSession().sendUserMessage(prompt, direction, maxTurns);
-          return { id, ok: true, text, elapsedMs: Date.now() - startedAt };
+          return ok({ text });
         } catch (err) {
-          return {
-            id,
-            ok: false,
-            error: "session: " + errMsg(err),
-            elapsedMs: Date.now() - startedAt,
-          };
+          return fail("session: " + errMsg(err));
         }
       }
 
       const result = await runClaudePrompt(prompt, { timeoutMs: msg!.timeoutMs || 30_000 });
-      if (result.ok) {
-        return { id, ok: true, text: result.text, elapsedMs: Date.now() - startedAt };
-      }
-      return {
-        id,
-        ok: false,
-        error: result.error,
-        stderr: result.stderr,
-        elapsedMs: Date.now() - startedAt,
-      };
+      return result.ok ? ok({ text: result.text }) : fail(result.error, { stderr: result.stderr });
     }
 
-    return { id, ok: false, error: `unknown type: ${type}`, elapsedMs: Date.now() - startedAt };
+    return fail(`unknown type: ${type}`);
   } catch (err) {
-    return {
-      id,
-      ok: false,
-      error: `handler crashed: ${errMsg(err)}`,
-      elapsedMs: Date.now() - startedAt,
-    };
+    return fail(`handler crashed: ${errMsg(err)}`);
   }
 }
 

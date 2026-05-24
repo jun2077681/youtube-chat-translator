@@ -12,6 +12,7 @@ import {
 
 const HOST_NAME = "com.ylct.translator";
 const REQUEST_TIMEOUT_MS = 35_000;
+const HOST_TIMEOUT_MS = 30_000;
 
 interface PendingEntry {
   resolve: (value: HostReply) => void;
@@ -31,29 +32,38 @@ interface HostRequest {
 let port: chrome.runtime.Port | null = null;
 const pending = new Map<string, PendingEntry>();
 
+function randomId(prefix: string): string {
+  return prefix + Math.random().toString(36).slice(2, 10);
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function ensurePort(): chrome.runtime.Port {
   if (port) return port;
   port = chrome.runtime.connectNative(HOST_NAME);
 
   port.onMessage.addListener((msg: HostReply & { id?: string }) => {
     const id = msg && msg.id;
-    if (!id || !pending.has(id)) {
+    const entry = id ? pending.get(id) : undefined;
+    if (!entry) {
       console.warn("[ylct] response for unknown id:", id, msg);
       return;
     }
-    const entry = pending.get(id)!;
     clearTimeout(entry.timer);
-    pending.delete(id);
+    pending.delete(id!);
     entry.resolve(msg);
   });
 
   port.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError;
-    console.warn("[ylct] native port disconnected:", err && err.message);
+    const reason = (err && err.message) || "native host disconnected";
+    console.warn("[ylct] native port disconnected:", reason);
     port = null;
     for (const { reject, timer } of pending.values()) {
       clearTimeout(timer);
-      reject(new Error(err && err.message ? err.message : "native host disconnected"));
+      reject(new Error(reason));
     }
     pending.clear();
   });
@@ -70,9 +80,7 @@ function sendToHost(payload: HostRequest): Promise<HostReply> {
       reject(err instanceof Error ? err : new Error(String(err)));
       return;
     }
-    const id = payload.id || "req-" + Math.random().toString(36).slice(2, 10);
-    const msg = { ...payload, id };
-
+    const id = payload.id || randomId("req-");
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`request timeout after ${REQUEST_TIMEOUT_MS}ms`));
@@ -80,7 +88,7 @@ function sendToHost(payload: HostRequest): Promise<HostReply> {
 
     pending.set(id, { resolve, reject, timer });
     try {
-      p.postMessage(msg);
+      p.postMessage({ ...payload, id });
     } catch (err) {
       clearTimeout(timer);
       pending.delete(id);
@@ -89,46 +97,34 @@ function sendToHost(payload: HostRequest): Promise<HostReply> {
   });
 }
 
-function buildPrompt(items: BatchItem[]): string {
-  return JSON.stringify({ items: items.map((it) => ({ id: it.id, ja: it.ja })) });
-}
-
 interface ParsedResults {
   results?: Array<{ id?: string; ko?: string; ja?: string }>;
 }
 
 function parseClaudeJson(text: string | undefined): ParsedResults | null {
   if (!text) return null;
-  let s = String(text).trim();
+  let s = text.trim();
 
   const fenceMatch = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   if (fenceMatch) s = fenceMatch[1].trim();
 
-  try {
-    return JSON.parse(s) as ParsedResults;
-  } catch {
-    /* fall through */
-  }
+  try { return JSON.parse(s) as ParsedResults; } catch { /* try slice below */ }
 
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first >= 0 && last > first) {
-    try {
-      return JSON.parse(s.slice(first, last + 1)) as ParsedResults;
-    } catch {
-      /* fall through */
-    }
+    try { return JSON.parse(s.slice(first, last + 1)) as ParsedResults; } catch { /* give up */ }
   }
   return null;
 }
 
-async function translateBatch(items: BatchItem[], maxTurns: number = 0): Promise<BatchResponse> {
+async function translateBatch(items: BatchItem[], maxTurns = 0): Promise<BatchResponse> {
   if (!Array.isArray(items) || items.length === 0) {
     return { ok: true, translations: [] };
   }
 
-  const prompt = buildPrompt(items);
-  const reply = await sendToHost({ type: "translate", prompt, maxTurns, timeoutMs: 30_000 });
+  const prompt = JSON.stringify({ items: items.map((it) => ({ id: it.id, ja: it.ja })) });
+  const reply = await sendToHost({ type: "translate", prompt, maxTurns, timeoutMs: HOST_TIMEOUT_MS });
 
   if (!reply.ok) {
     return { ok: false, error: reply.error || "host error", stderr: reply.stderr };
@@ -149,6 +145,44 @@ async function translateBatch(items: BatchItem[], maxTurns: number = 0): Promise
   return { ok: true, translations, elapsedMs: reply.elapsedMs };
 }
 
+async function translateKoToJa(text: string): Promise<KoToJaResponse> {
+  const trimmed = text.trim();
+  if (!trimmed) return { ok: false, error: "empty input" };
+
+  const prompt = JSON.stringify({ items: [{ id: randomId("k-"), ko: trimmed }] });
+  const reply = await sendToHost({ type: "translate", direction: "ko_to_ja", prompt, timeoutMs: HOST_TIMEOUT_MS });
+  if (!reply.ok) return { ok: false, error: reply.error || "host error" };
+
+  const result = parseClaudeJson(reply.text)?.results?.[0];
+  if (result && typeof result.ja === "string") {
+    return { ok: true, ja: result.ja, elapsedMs: reply.elapsedMs };
+  }
+  return { ok: false, error: "no translation in response", raw: reply.text };
+}
+
+async function pingHost(): Promise<unknown> {
+  return { ok: true, reply: await sendToHost({ type: "ping" }) };
+}
+
+async function callClaude(prompt: string): Promise<unknown> {
+  return { ok: true, reply: await sendToHost({ type: "translate", prompt, timeoutMs: HOST_TIMEOUT_MS }) };
+}
+
+async function resetSession(): Promise<unknown> {
+  const reply = await sendToHost({ type: "reset_session", timeoutMs: 5_000 });
+  return { ok: !!reply.ok, elapsedMs: reply.elapsedMs };
+}
+
+async function warmup(): Promise<unknown> {
+  const reply = await sendToHost({
+    type: "translate",
+    direction: "ja_to_ko",
+    prompt: JSON.stringify({ items: [{ id: "warmup", ja: "テスト" }] }),
+    timeoutMs: HOST_TIMEOUT_MS,
+  });
+  return { ok: !!reply.ok, elapsedMs: reply.elapsedMs };
+}
+
 type InboundMessage =
   | { type: typeof MSG.PING_HOST }
   | { type: typeof MSG.CALL_CLAUDE; prompt: string }
@@ -157,81 +191,25 @@ type InboundMessage =
   | { type: typeof MSG.RESET_SESSION }
   | { type: typeof MSG.WARMUP };
 
-function errMsg(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+function respond<T>(work: Promise<T>, sendResponse: (r: unknown) => void): true {
+  work
+    .then((result) => sendResponse(result))
+    .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
+  return true;
 }
 
 chrome.runtime.onMessage.addListener(
   (message: InboundMessage, _sender, sendResponse: (response: unknown) => void) => {
     if (!message || typeof message !== "object") return false;
 
-    if (message.type === MSG.PING_HOST) {
-      sendToHost({ type: "ping" })
-        .then((reply) => sendResponse({ ok: true, reply }))
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
-      return true;
+    switch (message.type) {
+      case MSG.PING_HOST:          return respond(pingHost(), sendResponse);
+      case MSG.CALL_CLAUDE:        return respond(callClaude(message.prompt), sendResponse);
+      case MSG.TRANSLATE_BATCH:    return respond(translateBatch(message.items || [], message.maxTurns || 0), sendResponse);
+      case MSG.TRANSLATE_KO_TO_JA: return respond(translateKoToJa(String(message.text || "")), sendResponse);
+      case MSG.RESET_SESSION:      return respond(resetSession(), sendResponse);
+      case MSG.WARMUP:             return respond(warmup(), sendResponse);
+      default:                     return false;
     }
-
-    if (message.type === MSG.CALL_CLAUDE) {
-      sendToHost({ type: "translate", prompt: message.prompt, timeoutMs: 30_000 })
-        .then((reply) => sendResponse({ ok: true, reply }))
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
-      return true;
-    }
-
-    if (message.type === MSG.TRANSLATE_BATCH) {
-      translateBatch(message.items || [], message.maxTurns || 0)
-        .then((result) => sendResponse(result))
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
-      return true;
-    }
-
-    if (message.type === MSG.RESET_SESSION) {
-      sendToHost({ type: "reset_session", timeoutMs: 5_000 })
-        .then((reply) => sendResponse({ ok: !!(reply && reply.ok), elapsedMs: reply && reply.elapsedMs }))
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
-      return true;
-    }
-
-    if (message.type === MSG.WARMUP) {
-      sendToHost({
-        type: "translate",
-        direction: "ja_to_ko",
-        prompt: JSON.stringify({ items: [{ id: "warmup", ja: "テスト" }] }),
-        timeoutMs: 30_000,
-      })
-        .then((reply) => sendResponse({ ok: !!(reply && reply.ok), elapsedMs: reply && reply.elapsedMs }))
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) }));
-      return true;
-    }
-
-    if (message.type === MSG.TRANSLATE_KO_TO_JA) {
-      const text = String(message.text || "").trim();
-      if (!text) {
-        sendResponse({ ok: false, error: "empty input" } satisfies KoToJaResponse);
-        return true;
-      }
-      const id = "k-" + Math.random().toString(36).slice(2, 8);
-      const prompt = JSON.stringify({ items: [{ id, ko: text }] });
-      sendToHost({ type: "translate", direction: "ko_to_ja", prompt, timeoutMs: 30_000 })
-        .then((reply) => {
-          if (!reply.ok) {
-            sendResponse({ ok: false, error: reply.error || "host error" } satisfies KoToJaResponse);
-            return;
-          }
-          const parsed = parseClaudeJson(reply.text);
-          const result = parsed && Array.isArray(parsed.results) && parsed.results[0];
-          if (result && typeof result.ja === "string") {
-            sendResponse({ ok: true, ja: result.ja, elapsedMs: reply.elapsedMs } satisfies KoToJaResponse);
-          } else {
-            sendResponse({ ok: false, error: "no translation in response", raw: reply.text } satisfies KoToJaResponse);
-          }
-        })
-        .catch((err) => sendResponse({ ok: false, error: errMsg(err) } satisfies KoToJaResponse));
-      return true;
-    }
-
-    return false;
   }
 );

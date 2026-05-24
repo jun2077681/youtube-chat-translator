@@ -16,24 +16,29 @@ export const SYSTEM_PROMPT: string = [
   "Output ONLY the JSON shape requested in the user message — no commentary, no markdown fences.",
 ].join("\n");
 
-const WRAP_JA_TO_KO = (content: string): string =>
-  "Translate the 'ja' field of each item to natural Korean. " +
-  "Output ONLY this JSON shape, no commentary:\n" +
-  "{\"results\":[{\"id\":\"<input id>\",\"ko\":\"<한국어 번역>\"}]}\n" +
-  "The 'ko' field MUST contain Korean (한국어), not English.\n\n" +
-  "Input:\n" + content;
-
-const WRAP_KO_TO_JA = (content: string): string =>
-  "Translate the 'ko' field of each item to natural casual Japanese suitable for live stream chat. " +
-  "Output ONLY this JSON shape, no commentary:\n" +
-  "{\"results\":[{\"id\":\"<input id>\",\"ja\":\"<日本語訳>\"}]}\n" +
-  "The 'ja' field MUST contain Japanese (日本語), not Korean, not English.\n\n" +
-  "Input:\n" + content;
-
 export type Direction = "ja_to_ko" | "ko_to_ja";
 
-function wrapFor(direction: Direction): (content: string) => string {
-  return direction === "ko_to_ja" ? WRAP_KO_TO_JA : WRAP_JA_TO_KO;
+const WRAP_SPECS: Record<Direction, { instr: string; out: "ko" | "ja"; sample: string; lang: string }> = {
+  ja_to_ko: {
+    instr: "Translate the 'ja' field of each item to natural Korean.",
+    out: "ko",
+    sample: "<한국어 번역>",
+    lang: "Korean (한국어), not English",
+  },
+  ko_to_ja: {
+    instr: "Translate the 'ko' field of each item to natural casual Japanese suitable for live stream chat.",
+    out: "ja",
+    sample: "<日本語訳>",
+    lang: "Japanese (日本語), not Korean, not English",
+  },
+};
+
+function wrap(direction: Direction, content: string): string {
+  const w = WRAP_SPECS[direction];
+  return `${w.instr} Output ONLY this JSON shape, no commentary:\n` +
+    `{"results":[{"id":"<input id>","${w.out}":"${w.sample}"}]}\n` +
+    `The '${w.out}' field MUST contain ${w.lang}.\n\n` +
+    `Input:\n${content}`;
 }
 
 const OUTPUT_SCHEMA = JSON.stringify({
@@ -202,8 +207,7 @@ export class ClaudeSession {
       item.reject(new Error("session request timeout"));
     }, REQUEST_TIMEOUT_MS);
 
-    const wrap = wrapFor(item.direction);
-    const wrappedContent = wrap(item.content);
+    const wrappedContent = wrap(item.direction, item.content);
 
     const payload = JSON.stringify({
       type: "user",

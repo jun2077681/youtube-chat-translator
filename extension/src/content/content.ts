@@ -139,11 +139,9 @@ declare global {
       .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
   }
 
-  const REPEAT_RE = /(.)\1{2,}/u;
   const REPEAT_RE_G = /(.)\1{2,}/gu;
   function collapseRepeats(text: string): string {
-    if (!text || !REPEAT_RE.test(text)) return text || "";
-    return text.replace(REPEAT_RE_G, "$1");
+    return text ? text.replace(REPEAT_RE_G, "$1") : "";
   }
 
   function cacheKey(text: string): string {
@@ -426,13 +424,17 @@ declare global {
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }
 
+  function pinToBottomBurst(scroller: HTMLElement, frames: number): void {
+    pinToBottom(scroller);
+    if (frames <= 0) return;
+    requestAnimationFrame(() => pinToBottomBurst(scroller, frames - 1));
+  }
+
   function preserveBottomScroll(mutateFn: () => void): void {
     const scroller = getChatScroller();
     const wasAtBottom = isNearBottom(scroller);
     mutateFn();
-    if (!wasAtBottom || !scroller) return;
-    pinToBottom(scroller);
-    requestAnimationFrame(() => pinToBottom(scroller));
+    if (wasAtBottom && scroller) pinToBottomBurst(scroller, 1);
   }
 
   function injectPlaceholder(node: HTMLElement, id: string): HTMLDivElement | null {
@@ -574,11 +576,7 @@ declare global {
       }
 
       if (wasAtBottom && scroller) {
-        pinToBottom(scroller);
-        requestAnimationFrame(() => {
-          pinToBottom(scroller);
-          requestAnimationFrame(() => pinToBottom(scroller));
-        });
+        pinToBottomBurst(scroller, 2);
         setTimeout(() => pinToBottom(scroller), 120);
       }
     });
@@ -684,19 +682,21 @@ declare global {
     return Math.min(hi, Math.max(lo, v));
   }
 
+  function pickNumber(v: unknown, fallback: number, lo: number, hi: number): number {
+    return clamp(typeof v === "number" ? v : fallback, lo, hi);
+  }
+
   function recomputeSettings(): void {
     chrome.storage.local.get(SETTINGS_KEY, (data) => {
       const s = (data && (data[SETTINGS_KEY] as Partial<Settings> | undefined)) || {};
 
-      const wantedWin = typeof s.batchWindowMs === "number" ? s.batchWindowMs : DEFAULT_BATCH_WINDOW_MS;
-      const nextWin = clamp(wantedWin, MIN_BATCH_WINDOW_MS, MAX_BATCH_WINDOW_MS);
+      const nextWin = pickNumber(s.batchWindowMs, DEFAULT_BATCH_WINDOW_MS, MIN_BATCH_WINDOW_MS, MAX_BATCH_WINDOW_MS);
       if (nextWin !== batchWindowMs) {
         batchWindowMs = nextWin;
         console.log("[ylct] batch window updated:", batchWindowMs + "ms");
       }
 
-      const wantedMt = typeof s.maxTurns === "number" ? s.maxTurns : 200;
-      const nextMt = clamp(wantedMt, 0, 100000);
+      const nextMt = pickNumber(s.maxTurns, SETTINGS_DEFAULTS.maxTurns, 0, 100000);
       if (nextMt !== maxTurns) {
         maxTurns = nextMt;
         console.log("[ylct] maxTurns updated:", maxTurns === 0 ? "unlimited" : maxTurns);
