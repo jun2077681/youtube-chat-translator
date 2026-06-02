@@ -4,6 +4,32 @@
 
 ---
 
+## M10 — 멀티 번역 제공자 (Claude / Codex / Gemini) (2026-06-02)
+
+확장 버전 0.10.0, native-host 0.2.0.
+
+### 추가
+- **번역 제공자 추상화** (`native-host/providers/`): `TranslationProvider` 인터페이스 + claude/codex/gemini 구현 + 레지스트리. 공유 프롬프트 모듈(`translation-prompt.js`)로 system prompt/wrap/schema 일원화
+- **팝업 제공자 선택**: 메인 탭 옵션에 claude/codex/gemini 드롭다운, 마지막 선택 영속(`ylct:settings:v1.provider`)
+- **Codex 영속 세션** (`codex-session.js`): `codex mcp-server`(MCP/stdio)로 도구 호출 → 호출당 ~5s 안정 (one-shot 8~38s 대비). `YLCT_CODEX_ONESHOT=1`로 `codex exec` 폴백
+- **Codex 모델 자동 감지** (`codex-models.js`): `codex debug models`로 계정 가용 mini 중 최저 버전 자동 선택(현재 gpt-5.4-mini), 세션당 1회 캐시. 모델 에러 시에만 재감지·재시도
+- **Gemini one-shot 최적화**: `gemini -o json` + `gemini-2.5-flash-lite` + `-e none`. prompt는 stdin 전달(Windows shell 토큰 분리 회피), `.response` 필드 파싱
+- **디버그 탭 번역 테스트**: 제공자 선택 + 일본어 입력 → 실제 번역 실행, 사용된 **모델**·번역 결과·소요시간 표시 (`TEST_TRANSLATE`)
+- **모델 정보 응답**: host translate 응답에 `model` 포함 (`TranslationProvider.currentModel()`)
+
+### 변경
+- 메시지 `CALL_CLAUDE` → `TEST_TRANSLATE`(provider+text)
+- `killTree` 공용화(`proc-util.js`) + one-shot `runCommand` 헬퍼 추출
+- background가 provider를 storage에서 매 호출 읽던 것을 메모리 캐시 + `storage.onChanged`로 전환
+- 호스트 종료 시 전 provider `shutdownAll()`로 좀비 프로세스 방지
+
+### 제공자별 특성
+- Claude: 영속 stream-json 세션, `haiku`(별칭이라 버전 무관)
+- Codex: 영속 mcp-server, gpt-5.4-mini 자동 감지, ~5s 안정
+- Gemini: one-shot flash-lite ~9s (CLI 기동 ~8s 바닥, keyless 모델 목록 API 부재로 자동 감지 불가)
+
+---
+
 ## M9 — 채널 화이트리스트 + popup 탭 분리 (2026-05-08)
 
 ### 추가

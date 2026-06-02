@@ -4,36 +4,33 @@
 // using the Native Messaging wire protocol (see nm-protocol.ts).
 
 import { readMessages, writeMessage } from "./nm-protocol";
-import { runClaudePrompt } from "./claude-runner";
-import { getSession } from "./claude-session";
+import { resolveProvider, shutdownAll } from "./providers";
+import { toDirection } from "./translation-prompt";
+import { createLogger, errMsg } from "./proc-util";
 
-const SESSION_MODE = process.env.YLCT_SESSION_MODE !== "0";
-
-function log(...args: unknown[]): void {
-  process.stderr.write("[ylct-host] " + args.map(String).join(" ") + "\n");
-}
+const log = createLogger("[ylct-host]");
 
 interface InboundMessage {
   id?: string;
   type?: string;
   prompt?: string;
+  provider?: string;
   direction?: "ja_to_ko" | "ko_to_ja";
   maxTurns?: number;
   timeoutMs?: number;
+  // Include the resolved model in the reply (debug test only); skipped on the
+  // hot translate path since it's informational.
+  withModel?: boolean;
 }
 
 interface Response {
   id: string;
   ok: boolean;
   text?: string;
+  model?: string;
   error?: string;
   stderr?: string;
   elapsedMs: number;
-}
-
-function errMsg(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
 }
 
 async function handleMessage(msg: InboundMessage | null | undefined): Promise<Response> {
@@ -53,7 +50,7 @@ async function handleMessage(msg: InboundMessage | null | undefined): Promise<Re
     if (type === "ping") return ok({ text: "pong" });
 
     if (type === "reset_session") {
-      getSession().manualRestart();
+      resolveProvider(msg!.provider).reset();
       return ok();
     }
 
@@ -61,19 +58,19 @@ async function handleMessage(msg: InboundMessage | null | undefined): Promise<Re
       const prompt = msg!.prompt;
       if (typeof prompt !== "string" || prompt.length === 0) return fail("empty prompt");
 
-      if (SESSION_MODE) {
-        const direction = msg!.direction === "ko_to_ja" ? "ko_to_ja" : "ja_to_ko";
-        const maxTurns = typeof msg!.maxTurns === "number" ? msg!.maxTurns : 0;
-        try {
-          const text = await getSession().sendUserMessage(prompt, direction, maxTurns);
-          return ok({ text });
-        } catch (err) {
-          return fail("session: " + errMsg(err));
+      const provider = resolveProvider(msg!.provider);
+      const direction = toDirection(msg!.direction);
+      const maxTurns = typeof msg!.maxTurns === "number" ? msg!.maxTurns : 0;
+      try {
+        const text = await provider.translate(prompt, { direction, maxTurns, timeoutMs: msg!.timeoutMs });
+        let model: string | undefined;
+        if (msg!.withModel) {
+          try { model = await provider.currentModel(); } catch { /* informational only */ }
         }
+        return ok({ text, model });
+      } catch (err) {
+        return fail(provider.name + ": " + errMsg(err));
       }
-
-      const result = await runClaudePrompt(prompt, { timeoutMs: msg!.timeoutMs || 30_000 });
-      return result.ok ? ok({ text: result.text }) : fail(result.error, { stderr: result.stderr });
     }
 
     return fail(`unknown type: ${type}`);
@@ -87,6 +84,7 @@ async function main(): Promise<void> {
 
   process.stdin.on("end", () => {
     log("stdin closed by Chrome, exiting");
+    shutdownAll();
     process.exit(0);
   });
   process.stdin.on("error", (err: Error) => {

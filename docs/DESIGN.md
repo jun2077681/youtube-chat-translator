@@ -1,6 +1,13 @@
 # YLCT — 설계 문서
 
-> Chrome 확장 프로그램으로 YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`)** 기반으로 한국어로 실시간 번역. 부가 기능으로 한국어 입력의 일본어 미리보기(KO→JA), 채널 화이트리스트, 옵션 토글 제공.
+> Chrome 확장 프로그램으로 YouTube 라이브 채팅의 일본어 메시지를 **CLI 기반 번역 제공자(Claude / Codex / Gemini)** 로 한국어로 실시간 번역. 제공자는 팝업에서 런타임에 선택. 부가 기능으로 한국어 입력의 일본어 미리보기(KO→JA), 채널 화이트리스트, 옵션 토글 제공.
+>
+> **제공자 특성 (실측 기준)**:
+> - **Claude**: 영속 stream-json 세션. 후속 호출 빠름(~5s, haiku).
+> - **Codex**: 영속 `codex mcp-server` 세션(MCP/stdio)으로 `codex` 도구를 매 호출. 프로세스 기동을 1회만 지불 → **호출당 ~5s 안정적**. 모델은 `codex debug models`로 **계정 가용 mini 중 최저 버전을 자동 감지**(현재 `gpt-5.4-mini`) + effort `low`. `YLCT_CODEX_ONESHOT=1`이면 `codex exec` 1회성(8~38s)으로 폴백.
+> - **Gemini**: `gemini -o json` 1회성. CLI 기동+인증이 ~8s 고정 바닥이라 영속화 이득이 thinking 변동으로 불확실 → one-shot 유지하되 **`gemini-2.5-flash-lite` + `-e none`로 ~9s 일관**되게 최적화. (계정상 더 가벼운 `gemini-3-flash-lite`/`flash-lite-latest`는 미가용.)
+>
+> 배치 윈도우로 호출 빈도를 낮춰 cold start 부담을 추가 완화.
 
 **최종 갱신**: 2026-05-08 (M9 시점)
 **마일스톤 이력**: [CHANGELOG.md](CHANGELOG.md)
@@ -105,10 +112,19 @@
 | `extension/src/content/content.css` | live_chat iframe | placeholder/done/error 스타일 |
 | `extension/src/popup/popup.html` | popup | 메인/디버그 탭 UI |
 | `extension/src/popup/popup.js` | popup | 탭 전환, channel detection, whitelist CRUD, 옵션 |
-| `native-host/host.js` | OS 프로세스 | stdin/stdout 메시지 라우팅 |
+| `native-host/host.js` | OS 프로세스 | stdin/stdout 메시지 라우팅, provider 분기 |
 | `native-host/nm-protocol.js` | OS 프로세스 | 4-byte length prefix wire protocol |
-| `native-host/claude-session.js` | OS 프로세스 | persistent claude 프로세스 관리 (M7+) |
-| `native-host/claude-runner.js` | OS 프로세스 | one-shot fallback (M3 legacy) |
+| `native-host/translation-prompt.js` | OS 프로세스 | 공유 system prompt / wrap / output schema |
+| `native-host/proc-util.js` | OS 프로세스 | killTree + one-shot runCommand 헬퍼 |
+| `native-host/providers/types.js` | OS 프로세스 | `TranslationProvider` 인터페이스, provider 판별 |
+| `native-host/providers/claude.js` | OS 프로세스 | Claude provider (영속 세션 + one-shot fallback) |
+| `native-host/providers/codex.js` | OS 프로세스 | Codex provider (영속 mcp-server + exec one-shot fallback) |
+| `native-host/providers/gemini.js` | OS 프로세스 | Gemini provider (`gemini -o json` one-shot, flash-lite) |
+| `native-host/providers/index.js` | OS 프로세스 | provider 레지스트리 / 선택 |
+| `native-host/claude-session.js` | OS 프로세스 | persistent claude stream-json 프로세스 관리 (M7+) |
+| `native-host/codex-session.js` | OS 프로세스 | persistent codex mcp-server (MCP/stdio) 관리 |
+| `native-host/codex-models.js` | OS 프로세스 | `codex debug models`로 가용 mini 모델 자동 감지 |
+| `native-host/claude-runner.js` | OS 프로세스 | claude one-shot fallback (M3 legacy) |
 | `native-host/install.ps1` | PowerShell | NMH 등록 + host.bat 생성 |
 
 ### 2.3 Manifest V3
@@ -313,9 +329,11 @@ async function shouldOperateForCurrentChannel() {
 ```json
 {
   "batchWindowMs": 15000,
-  "maxTurns": 200
+  "maxTurns": 200,
+  "provider": "claude"
 }
 ```
+`provider`: `"claude" | "codex" | "gemini"` (기본 `"claude"`). background가 매 번역 호출 직전 이 값을 읽어 native host에 전달.
 
 ---
 
@@ -325,7 +343,7 @@ async function shouldOperateForCurrentChannel() {
 | type | payload | 응답 |
 |------|---------|------|
 | `PING_HOST` | (none) | `{ok, reply: {text:"pong", elapsedMs}}` |
-| `CALL_CLAUDE` | `{prompt}` | `{ok, reply: {text, elapsedMs}}` |
+| `TEST_TRANSLATE` (디버그 탭) | `{provider, text}` | `{ok, provider, model, translated, raw, elapsedMs}` |
 | `TRANSLATE_BATCH` | `{items: [{id, ja}], maxTurns}` | `{ok, translations: [{id, ko}], elapsedMs}` |
 | `TRANSLATE_KO_TO_JA` | `{text}` | `{ok, ja, elapsedMs}` |
 | `WARMUP` | (none) | `{ok, elapsedMs}` |
@@ -336,10 +354,24 @@ async function shouldOperateForCurrentChannel() {
 | type | payload | 응답 |
 |------|---------|------|
 | `ping` | `{id}` | `{id, ok, text:"pong", elapsedMs}` |
-| `translate` | `{id, prompt, direction?, maxTurns?, timeoutMs?}` | `{id, ok, text, elapsedMs}` 또는 `{id, ok:false, error, stderr}` |
-| `reset_session` | `{id}` | `{id, ok, elapsedMs}` |
+| `translate` | `{id, provider?, prompt, direction?, maxTurns?, timeoutMs?}` | `{id, ok, text, model, elapsedMs}` 또는 `{id, ok:false, error, stderr}` (`model`은 실제 사용된 모델, 디버그 표시용) |
+| `reset_session` | `{id, provider?}` | `{id, ok, elapsedMs}` |
 
-### 6.3 Native Host ↔ claude
+`provider`: `"claude" | "codex" | "gemini"` (없거나 미지정 시 `claude`). host가 해당 provider로 라우팅. `maxTurns`는 Claude 영속 세션에서만 의미 있고 one-shot provider는 무시.
+
+### 6.3 Native Host ↔ 번역 제공자(provider)
+
+모든 provider는 공유 `translation-prompt`(system prompt + direction별 wrap)를 사용. 출력은 `{"results":[{"id","ko"|"ja"}]}` JSON 텍스트.
+
+- **claude**: 영속 stream-json 세션. Host → claude(stdin): `{type:"user", message:{role:"user", content:"<wrapped>"}}`. claude → Host(stdout NDJSON): `{type:"result", is_error, result:"<JSON>"}` 만 채택, 나머지 무시.
+- **codex (기본, 영속)**: `codex mcp-server`를 1회 spawn해 MCP(JSON-RPC 2.0, 개행 구분) `initialize` 후, 매 번역마다 `tools/call` `codex` 도구 호출(`arguments`: prompt, model, sandbox=read-only, cwd, config.model_reasoning_effort=low). 응답 `result.content[].text`가 최종 JSON. idle/요청 timeout + restart는 claude-session과 동일.
+- **codex 모델 자동 감지** (`codex-models.ts`): 버전명이 박힌 codex 모델은 버전업·계정별로 이름이 달라지므로, host 세션당 1회 `codex debug models`(계정 가용 카탈로그 JSON)를 실행해 **`visibility:"list"`인 mini 중 버전이 가장 낮은 것**을 자동 선택(예: gpt-5.4-mini)·캐시. mini가 없거나 명령 실패 시 `-m` 생략(CLI 기본). `YLCT_CODEX_MODEL` 지정 시 자동 감지를 건너뛰고 그 값 사용. (참고: `codex login` 토큰이 만료되면 `tools/call`이 인증 에러를 반환하므로 재로그인 필요 — 코드와 무관.)
+- **codex (폴백, `YLCT_CODEX_ONESHOT=1`)**: `codex exec --sandbox read-only --skip-git-repo-check -C <tmp> -c model_reasoning_effort=low --output-last-message <tmp> -`. prompt는 stdin, 최종 메시지를 파일에서 읽어 잡음 없는 JSON 확보(읽은 뒤 삭제).
+- **gemini**: `gemini -o json --approval-mode yolo --skip-trust -e none -m gemini-2.5-flash-lite`. prompt는 stdin(공백 포함 `-p` 인자는 Windows shell에서 토큰 분리되어 실패). stdout JSON의 `.response` 필드에서 본문 추출. (`-e none`+flash-lite로 startup/지연 최소화; 영속 ACP는 모델 thinking 변동·복잡도로 제외.)
+
+환경변수 오버라이드: `YLCT_CODEX_ONESHOT`(=1이면 codex 1회성), `YLCT_CODEX_MODEL`(빈값=CLI 기본), `YLCT_GEMINI_MODEL`(빈값=CLI 기본, 기본 flash-lite), `YLCT_CODEX_EFFORT`, `YLCT_*_PATH`, `YLCT_*_TIMEOUT_MS`, `YLCT_*_IDLE_MS`, `YLCT_*_CWD`.
+
+### 6.4 (legacy) Native Host ↔ claude
 - Host → claude (stdin): `{type:"user", message:{role:"user", content:"<wrapped prompt>"}}` + 줄바꿈
 - claude → Host (stdout NDJSON):
   - `{type:"assistant", message:{...}}` (무시)
@@ -398,6 +430,6 @@ async function shouldOperateForCurrentChannel() {
 2. **Popout 전용 채팅 창**: parent 없을 때 채널 감지 불가.
 3. **YouTube DOM 변경 대응**: 셀렉터 fallback 추가 검토.
 4. **Streaming 출력**: 부분 표시. UX 복잡도 trade-off.
-5. **모델 선택 popup**: 환경변수 외에 popup 토글.
+5. **모델 선택 popup**: provider(claude/codex/gemini) 선택은 popup에서 가능. 각 provider의 모델은 아직 환경변수(`YLCT_*_MODEL`)로만 오버라이드 — popup 모델 선택은 향후 과제.
 6. **화이트리스트 export/import**: JSON 파일로 백업/공유.
 7. **stats 영속화**: 세션/일/주 단위 누적.

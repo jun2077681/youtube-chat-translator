@@ -2,11 +2,15 @@
 // over a single persistent Native Messaging port.
 
 import {
+  KEY,
   MSG,
+  PROVIDER_DEFAULT,
+  isProvider,
   type BatchItem,
   type BatchResponse,
   type HostReply,
   type KoToJaResponse,
+  type Provider,
   type Translation,
 } from "../shared/constants";
 
@@ -24,13 +28,30 @@ interface HostRequest {
   type: string;
   id?: string;
   prompt?: string;
+  provider?: Provider;
   direction?: "ja_to_ko" | "ko_to_ja";
   maxTurns?: number;
   timeoutMs?: number;
+  withModel?: boolean;
 }
 
 let port: chrome.runtime.Port | null = null;
 const pending = new Map<string, PendingEntry>();
+
+// Selected provider, cached in memory so the translate hot path doesn't hit
+// chrome.storage on every call. The native host routes each translate/reset
+// call to the matching CLI; default to Claude when unset.
+let provider: Provider = PROVIDER_DEFAULT;
+
+function readProvider(settings: unknown): Provider {
+  const s = settings as { provider?: unknown } | undefined;
+  return isProvider(s && s.provider) ? (s!.provider as Provider) : PROVIDER_DEFAULT;
+}
+
+chrome.storage.local.get(KEY.SETTINGS, (data) => { provider = readProvider(data && data[KEY.SETTINGS]); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes[KEY.SETTINGS]) provider = readProvider(changes[KEY.SETTINGS].newValue);
+});
 
 function randomId(prefix: string): string {
   return prefix + Math.random().toString(36).slice(2, 10);
@@ -124,7 +145,7 @@ async function translateBatch(items: BatchItem[], maxTurns = 0): Promise<BatchRe
   }
 
   const prompt = JSON.stringify({ items: items.map((it) => ({ id: it.id, ja: it.ja })) });
-  const reply = await sendToHost({ type: "translate", prompt, maxTurns, timeoutMs: HOST_TIMEOUT_MS });
+  const reply = await sendToHost({ type: "translate", provider, prompt, maxTurns, timeoutMs: HOST_TIMEOUT_MS });
 
   if (!reply.ok) {
     return { ok: false, error: reply.error || "host error", stderr: reply.stderr };
@@ -150,7 +171,7 @@ async function translateKoToJa(text: string): Promise<KoToJaResponse> {
   if (!trimmed) return { ok: false, error: "empty input" };
 
   const prompt = JSON.stringify({ items: [{ id: randomId("k-"), ko: trimmed }] });
-  const reply = await sendToHost({ type: "translate", direction: "ko_to_ja", prompt, timeoutMs: HOST_TIMEOUT_MS });
+  const reply = await sendToHost({ type: "translate", provider, direction: "ko_to_ja", prompt, timeoutMs: HOST_TIMEOUT_MS });
   if (!reply.ok) return { ok: false, error: reply.error || "host error" };
 
   const result = parseClaudeJson(reply.text)?.results?.[0];
@@ -164,18 +185,34 @@ async function pingHost(): Promise<unknown> {
   return { ok: true, reply: await sendToHost({ type: "ping" }) };
 }
 
-async function callClaude(prompt: string): Promise<unknown> {
-  return { ok: true, reply: await sendToHost({ type: "translate", prompt, timeoutMs: HOST_TIMEOUT_MS }) };
+// Debug-tab translation test: run one JA->KO translation through a chosen
+// provider and surface the resolved model + translated output.
+async function testTranslate(p: Provider, text: string): Promise<unknown> {
+  const trimmed = text.trim();
+  if (!trimmed) return { ok: false, error: "empty input" };
+  const prompt = JSON.stringify({ items: [{ id: "test", ja: trimmed }] });
+  const reply = await sendToHost({ type: "translate", provider: p, direction: "ja_to_ko", prompt, timeoutMs: HOST_TIMEOUT_MS, withModel: true });
+  return {
+    ok: !!reply.ok,
+    provider: p,
+    model: reply.model,
+    translated: parseClaudeJson(reply.text)?.results?.[0]?.ko ?? null,
+    raw: reply.text,
+    elapsedMs: reply.elapsedMs,
+    error: reply.ok ? undefined : reply.error,
+    stderr: reply.stderr,
+  };
 }
 
 async function resetSession(): Promise<unknown> {
-  const reply = await sendToHost({ type: "reset_session", timeoutMs: 5_000 });
+  const reply = await sendToHost({ type: "reset_session", provider, timeoutMs: 5_000 });
   return { ok: !!reply.ok, elapsedMs: reply.elapsedMs };
 }
 
 async function warmup(): Promise<unknown> {
   const reply = await sendToHost({
     type: "translate",
+    provider,
     direction: "ja_to_ko",
     prompt: JSON.stringify({ items: [{ id: "warmup", ja: "テスト" }] }),
     timeoutMs: HOST_TIMEOUT_MS,
@@ -185,7 +222,7 @@ async function warmup(): Promise<unknown> {
 
 type InboundMessage =
   | { type: typeof MSG.PING_HOST }
-  | { type: typeof MSG.CALL_CLAUDE; prompt: string }
+  | { type: typeof MSG.TEST_TRANSLATE; provider: Provider; text: string }
   | { type: typeof MSG.TRANSLATE_BATCH; items: BatchItem[]; maxTurns?: number }
   | { type: typeof MSG.TRANSLATE_KO_TO_JA; text: string }
   | { type: typeof MSG.RESET_SESSION }
@@ -204,7 +241,7 @@ chrome.runtime.onMessage.addListener(
 
     switch (message.type) {
       case MSG.PING_HOST:          return respond(pingHost(), sendResponse);
-      case MSG.CALL_CLAUDE:        return respond(callClaude(message.prompt), sendResponse);
+      case MSG.TEST_TRANSLATE:     return respond(testTranslate(message.provider, message.text), sendResponse);
       case MSG.TRANSLATE_BATCH:    return respond(translateBatch(message.items || [], message.maxTurns || 0), sendResponse);
       case MSG.TRANSLATE_KO_TO_JA: return respond(translateKoToJa(String(message.text || "")), sendResponse);
       case MSG.RESET_SESSION:      return respond(resetSession(), sendResponse);

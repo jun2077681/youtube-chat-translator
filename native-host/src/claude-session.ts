@@ -1,79 +1,18 @@
 // Long-running `claude --print --input-format stream-json --output-format stream-json` session.
 // Spawn once, send many user messages. Avoids cold start per request.
 
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { SYSTEM_PROMPT, OUTPUT_SCHEMA, wrap, type Direction } from "./translation-prompt";
+import { createLogger, killTree, readJsonLines } from "./proc-util";
+import { envInt } from "./env";
 
 const DEFAULT_CMD: string = process.env.YLCT_CLAUDE_PATH || "claude";
 const DEFAULT_MODEL: string = process.env.YLCT_MODEL || "haiku";
-const IDLE_TIMEOUT_MS: number = parseInt(process.env.YLCT_SESSION_IDLE_MS ?? "", 10) || 30 * 60_000;
-const REQUEST_TIMEOUT_MS: number = parseInt(process.env.YLCT_REQUEST_TIMEOUT_MS ?? "", 10) || 60_000;
+const IDLE_TIMEOUT_MS: number = envInt("YLCT_SESSION_IDLE_MS", 30 * 60_000);
+const REQUEST_TIMEOUT_MS: number = envInt("YLCT_REQUEST_TIMEOUT_MS", 60_000);
 
-export const SYSTEM_PROMPT: string = [
-  "You translate live-stream chat between Japanese and Korean.",
-  "Tone: casual, live-chat. Preserve emoji, kaomoji, @mentions, URLs, and hashtags as-is.",
-  "For internet slang use natural equivalents in the target language.",
-  "Each output 'id' MUST match the input 'id'.",
-  "Output ONLY the JSON shape requested in the user message — no commentary, no markdown fences.",
-].join("\n");
-
-export type Direction = "ja_to_ko" | "ko_to_ja";
-
-const WRAP_SPECS: Record<Direction, { instr: string; out: "ko" | "ja"; sample: string; lang: string }> = {
-  ja_to_ko: {
-    instr: "Translate the 'ja' field of each item to natural Korean.",
-    out: "ko",
-    sample: "<한국어 번역>",
-    lang: "Korean (한국어), not English",
-  },
-  ko_to_ja: {
-    instr: "Translate the 'ko' field of each item to natural casual Japanese suitable for live stream chat.",
-    out: "ja",
-    sample: "<日本語訳>",
-    lang: "Japanese (日本語), not Korean, not English",
-  },
-};
-
-function wrap(direction: Direction, content: string): string {
-  const w = WRAP_SPECS[direction];
-  return `${w.instr} Output ONLY this JSON shape, no commentary:\n` +
-    `{"results":[{"id":"<input id>","${w.out}":"${w.sample}"}]}\n` +
-    `The '${w.out}' field MUST contain ${w.lang}.\n\n` +
-    `Input:\n${content}`;
-}
-
-const OUTPUT_SCHEMA = JSON.stringify({
-  type: "object",
-  properties: {
-    results: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: { type: "string" },
-          ko: { type: "string" },
-          ja: { type: "string" },
-        },
-        required: ["id"],
-      },
-    },
-  },
-  required: ["results"],
-});
-
-function log(...args: unknown[]): void {
-  process.stderr.write("[ylct-session] " + args.map(String).join(" ") + "\n");
-}
-
-function killTree(proc: ChildProcess): void {
-  const pid = proc.pid;
-  if (!pid) { try { proc.kill(); } catch { /* ignore */ } return; }
-  if (process.platform === "win32") {
-    try { execSync(`taskkill /pid ${pid} /T /F`, { stdio: "ignore" }); } catch { /* ignore */ }
-  } else {
-    try { proc.kill("SIGKILL"); } catch { /* ignore */ }
-  }
-}
+const log = createLogger("[ylct-session]");
 
 interface QueueItem {
   content: string;
@@ -161,16 +100,7 @@ export class ClaudeSession {
   }
 
   private onStdout(chunk: string): void {
-    this.buffer += chunk;
-    let nl: number;
-    while ((nl = this.buffer.indexOf("\n")) >= 0) {
-      const line = this.buffer.slice(0, nl).trim();
-      this.buffer = this.buffer.slice(nl + 1);
-      if (!line) continue;
-      let obj: unknown;
-      try { obj = JSON.parse(line); } catch { continue; }
-      this.onMessage(obj);
-    }
+    this.buffer = readJsonLines(this.buffer, chunk, (obj) => this.onMessage(obj));
   }
 
   private onMessage(obj: unknown): void {
@@ -284,8 +214,6 @@ export class ClaudeSession {
     log("manual session restart requested");
     this.shutdown();
   }
-
-  getTurnCount(): number { return this.turnCount; }
 }
 
 let _instance: ClaudeSession | null = null;
