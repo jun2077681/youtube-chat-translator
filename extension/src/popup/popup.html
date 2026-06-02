@@ -85,7 +85,10 @@
     <ul class="whitelist" id="whitelist-list"></ul>
 
     <h2>옵션</h2>
-    <label for="batch-window">번역 대기 시간 (배치 윈도우):</label>
+    <label for="provider">번역 제공자:</label>
+    <select id="provider" style="width:100%; padding:6px; font-size:13px; margin-top:4px;"></select>
+
+    <label for="batch-window" style="margin-top:10px;">번역 대기 시간 (배치 윈도우):</label>
     <select id="batch-window" style="width:100%; padding:6px; font-size:13px; margin-top:4px;">
       <option value="5000">5초 (가장 빠름, Max 한도 부담)</option>
       <option value="10000">10초</option>
@@ -110,10 +113,13 @@
     <h2>Native Host 점검</h2>
     <button id="ping-btn">1. Ping host (sanity check)</button>
 
-    <label for="prompt-input">Prompt for claude -p:</label>
-    <input id="prompt-input" type="text"
-           value="다음 일본어를 한국어로 번역만 해줘. 다른 말 없이 번역문만 출력. 입력: やばい今のプレイ神！" />
-    <button id="claude-btn">2. Call claude -p</button>
+    <h2>번역 테스트</h2>
+    <label for="debug-provider">제공자:</label>
+    <select id="debug-provider" style="width:100%; padding:6px; font-size:13px; margin-top:4px;"></select>
+
+    <label for="prompt-input" style="margin-top:8px;">테스트할 일본어:</label>
+    <input id="prompt-input" type="text" value="やばい今のプレイ神！" />
+    <button id="test-btn">2. 선택한 제공자로 번역 테스트</button>
 
     <pre id="output">[idle]</pre>
   </div>

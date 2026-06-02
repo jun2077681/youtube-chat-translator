@@ -1,6 +1,6 @@
 # YouTube Live Chat Translator (YLCT)
 
-YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`)**를 통해 한국어로 실시간 번역하는 Chrome 확장 프로그램. **Anthropic API 키 없이 Claude Max 구독을 활용**한다.
+YouTube 라이브 채팅의 일본어 메시지를 **CLI 번역 제공자(Claude / Codex / Gemini)**를 통해 한국어로 실시간 번역하는 Chrome 확장 프로그램. 제공자는 팝업에서 선택하며, **API 키 없이 각 CLI의 구독 로그인(Claude Max / ChatGPT / Google)**을 활용한다.
 
 추가 기능: 한국어 입력을 일본어로 미리보기 번역(KO→JA), 채널 화이트리스트.
 
@@ -10,13 +10,15 @@ YouTube 라이브 채팅의 일본어 메시지를 **Claude Code CLI(`claude -p`
 
 ## 빠른 시작
 
-> **개발자가 아니라 그냥 쓰고 싶다면**: [Releases 페이지](https://github.com/jun2077681/youtube-chat-translator/releases)에서 최신 `ylct-X.Y.Z.zip` 다운로드 → 압축 해제 → `native-host\install.ps1` 실행 → `chrome://extensions`에서 `extension/` 폴더를 unpacked로 로드. 빌드 단계 생략됩니다. 사전 요구사항 0번(Node.js + Claude CLI)은 여전히 필요합니다.
+> **개발자가 아니라 그냥 쓰고 싶다면**: [Releases 페이지](https://github.com/jun2077681/youtube-chat-translator/releases)에서 최신 `ylct-X.Y.Z.zip` 다운로드 → 압축 해제 → `native-host\install.ps1` 실행 → `chrome://extensions`에서 `extension/` 폴더를 unpacked로 로드. 빌드 단계 생략됩니다. 사전 요구사항 0번(Node.js + 사용할 제공자 CLI)은 여전히 필요합니다.
 
 ### 0. 사전 요구사항
 - Windows 10/11 (현재 install 스크립트는 Windows만 지원)
 - **Node.js 18+** (PATH에 등록)
-- **Claude Code CLI** (`claude` 명령이 PATH에 있고 Max 구독으로 로그인됨)
-  - 설치 확인: 터미널에서 `claude -p "안녕"` 실행 → 응답이 오면 OK
+- **번역 제공자 CLI** — 사용할 것만 설치/로그인하면 됩니다 (팝업에서 선택). 최소 1개 필요.
+  - **Claude Code CLI** (`claude`, Max 구독 로그인) — 기본값. 확인: `claude -p "안녕"`
+  - **Codex CLI** (`codex`, ChatGPT 구독 로그인) — 확인: `codex login` 후 사용
+  - **Gemini CLI** (`gemini`, Google 로그인) — 확인: `gemini -p "안녕"`
 - **Google Chrome**
 
 ### 1. 확장 빌드

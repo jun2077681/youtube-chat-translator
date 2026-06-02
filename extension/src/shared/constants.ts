@@ -3,7 +3,7 @@
 
 export const MSG = {
   PING_HOST: "PING_HOST",
-  CALL_CLAUDE: "CALL_CLAUDE",
+  TEST_TRANSLATE: "TEST_TRANSLATE",
   TRANSLATE_BATCH: "TRANSLATE_BATCH",
   TRANSLATE_KO_TO_JA: "TRANSLATE_KO_TO_JA",
   RESET_SESSION: "RESET_SESSION",
@@ -19,14 +19,34 @@ export const KEY = {
   CACHE: "ylct:cache:v1",
 } as const;
 
+// Translation backend. The native host routes each request to the matching CLI.
+export type Provider = "claude" | "codex" | "gemini";
+
+export const PROVIDERS: readonly Provider[] = ["claude", "codex", "gemini"];
+
+export const PROVIDER_DEFAULT: Provider = "claude";
+
+// Human-readable labels for the popup dropdown.
+export const PROVIDER_LABELS: Readonly<Record<Provider, string>> = Object.freeze({
+  claude: "Claude (빠름, 세션 유지)",
+  codex: "Codex (호출마다 cold start)",
+  gemini: "Gemini (호출마다 cold start)",
+});
+
+export function isProvider(value: unknown): value is Provider {
+  return typeof value === "string" && (PROVIDERS as readonly string[]).includes(value);
+}
+
 export interface Settings {
   batchWindowMs: number;
   maxTurns: number;
+  provider: Provider;
 }
 
 export const SETTINGS_DEFAULTS: Readonly<Settings> = Object.freeze({
   batchWindowMs: 15000,
   maxTurns: 200,
+  provider: PROVIDER_DEFAULT,
 });
 
 export interface ChannelInfo {
@@ -115,6 +135,7 @@ export interface Translation {
 export interface HostReply {
   ok: boolean;
   text?: string;
+  model?: string;
   error?: string;
   stderr?: string;
   elapsedMs?: number;

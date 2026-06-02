@@ -3,8 +3,13 @@
 import {
   KEY,
   MSG,
+  PROVIDERS,
+  PROVIDER_DEFAULT,
+  PROVIDER_LABELS,
   SETTINGS_DEFAULTS,
+  isProvider,
   type ChannelInfo,
+  type Provider,
   type Settings,
   type WhitelistEntry,
 } from "../shared/constants";
@@ -56,8 +61,9 @@ function saveWhitelist(list: WhitelistEntry[]): Promise<void> {
 }
 
 async function refreshWhitelistUI(): Promise<void> {
-  await renderWhitelist();
-  await refreshAddButton();
+  const list = await loadWhitelist();
+  renderWhitelist(list);
+  refreshAddButton(list);
 }
 
 async function addCurrent(): Promise<void> {
@@ -81,8 +87,7 @@ async function removeChannel(handle: string): Promise<void> {
   await refreshWhitelistUI();
 }
 
-async function renderWhitelist(): Promise<void> {
-  const list = await loadWhitelist();
+function renderWhitelist(list: WhitelistEntry[]): void {
   whitelistList.innerHTML = "";
   if (list.length === 0) {
     const li = document.createElement("li");
@@ -106,13 +111,12 @@ async function renderWhitelist(): Promise<void> {
   }
 }
 
-async function refreshAddButton(): Promise<void> {
+function refreshAddButton(list: WhitelistEntry[]): void {
   if (!detectedChannel || !detectedChannel.handle) {
     addChannelBtn.disabled = true;
     addChannelBtn.textContent = "현재 채널을 감지할 수 없음";
     return;
   }
-  const list = await loadWhitelist();
   const already = list.some((e) => e.handle === detectedChannel!.handle);
   addChannelBtn.disabled = already;
   addChannelBtn.textContent = already
@@ -179,15 +183,37 @@ async function patchSettings(patch: Partial<Settings>): Promise<void> {
   });
 }
 
+const providerSelect = $("provider") as HTMLSelectElement;
+const debugProviderSelect = $("debug-provider") as HTMLSelectElement;
 const batchWindowSelect = $("batch-window") as HTMLSelectElement;
 const maxTurnsSelect = $("max-turns") as HTMLSelectElement;
 const resetSessionBtn = $("reset-session-btn") as HTMLButtonElement;
 
+function fillProviderSelect(sel: HTMLSelectElement): void {
+  sel.innerHTML = "";
+  for (const p of PROVIDERS) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = PROVIDER_LABELS[p];
+    sel.appendChild(opt);
+  }
+}
+
 async function initSettings(): Promise<void> {
+  fillProviderSelect(providerSelect);
+  fillProviderSelect(debugProviderSelect);
   const s = await loadSettings();
+  const p = isProvider(s.provider) ? s.provider : PROVIDER_DEFAULT;
+  providerSelect.value = p;
+  debugProviderSelect.value = p;
   batchWindowSelect.value = String(typeof s.batchWindowMs === "number" ? s.batchWindowMs : SETTINGS_DEFAULTS.batchWindowMs);
   maxTurnsSelect.value = String(typeof s.maxTurns === "number" ? s.maxTurns : SETTINGS_DEFAULTS.maxTurns);
 }
+
+providerSelect.addEventListener("change", () => {
+  const v = providerSelect.value;
+  if (isProvider(v)) patchSettings({ provider: v as Provider });
+});
 
 batchWindowSelect.addEventListener("change", () => {
   const v = parseInt(batchWindowSelect.value, 10);
@@ -229,13 +255,12 @@ async function initMainTab(): Promise<void> {
     currentChannelName.textContent = "YouTube 라이브 페이지가 아니거나 감지 실패";
     currentChannelId.textContent = "";
   }
-  await renderWhitelist();
-  await refreshAddButton();
+  await refreshWhitelistUI();
   await initSettings();
 }
 
 const pingBtn = $("ping-btn") as HTMLButtonElement;
-const claudeBtn = $("claude-btn") as HTMLButtonElement;
+const testBtn = $("test-btn") as HTMLButtonElement;
 const promptInput = $("prompt-input") as HTMLInputElement;
 const output = $("output");
 
@@ -274,13 +299,12 @@ pingBtn.addEventListener("click", () => {
   withButton(pingBtn, "PING", () => send({ type: MSG.PING_HOST }));
 });
 
-claudeBtn.addEventListener("click", () => {
-  const prompt = promptInput.value.trim();
-  if (!prompt) {
-    setOutput("CALL_CLAUDE", { error: "empty prompt" });
-    return;
-  }
-  withButton(claudeBtn, "CALL_CLAUDE", () => send({ type: MSG.CALL_CLAUDE, prompt }));
+testBtn.addEventListener("click", () => {
+  const text = promptInput.value.trim();
+  const p = debugProviderSelect.value;
+  if (!text) { setOutput("TEST", { error: "empty input" }); return; }
+  if (!isProvider(p)) { setOutput("TEST", { error: "invalid provider" }); return; }
+  withButton(testBtn, `TEST ${p}`, () => send({ type: MSG.TEST_TRANSLATE, provider: p as Provider, text }));
 });
 
 initMainTab();
