@@ -6,8 +6,9 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createLogger, killTree, readJsonLines } from "./proc-util";
-import { getCodexModel, resetCodexModelCache, withModelErrorRetry } from "./codex-models";
+import { getCodexModel, withModelErrorRetry } from "./codex-models";
 import { CODEX_CMD, CODEX_EFFORT, CODEX_WORK_DIR, CODEX_REQUEST_TIMEOUT_MS, CODEX_IDLE_TIMEOUT_MS } from "./codex-config";
+import { SessionRegistry } from "./session-registry";
 
 // MCP handshake protocol version we advertise to `codex mcp-server`.
 const MCP_PROTOCOL_VERSION = "2025-06-18";
@@ -34,6 +35,12 @@ export class CodexSession {
   private pending = new Map<number, Pending>();
   private ready: Promise<void> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  // Called once on full teardown so the owning session map drops the dead instance.
+  private onDispose: (() => void) | null = null;
+
+  setDispose(fn: () => void): void {
+    this.onDispose = fn;
+  }
 
   private spawnProc(): void {
     log("spawning codex mcp-server");
@@ -196,17 +203,13 @@ export class CodexSession {
       try { proc.stdin?.end(); } catch { /* ignore */ }
       killTree(proc);
     }
-  }
-
-  manualRestart(): void {
-    log("manual restart requested");
-    resetCodexModelCache();
-    this.shutdown();
+    if (this.onDispose) {
+      const fn = this.onDispose;
+      this.onDispose = null;
+      fn();
+    }
   }
 }
 
-let _instance: CodexSession | null = null;
-export function getCodexSession(): CodexSession {
-  if (!_instance) _instance = new CodexSession();
-  return _instance;
-}
+// One persistent Codex session per key (Chrome tab id), mirroring claude-session.
+export const codexSessions = new SessionRegistry<CodexSession>(() => new CodexSession());

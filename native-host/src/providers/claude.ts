@@ -2,7 +2,7 @@
 // (fast subsequent calls); set YLCT_SESSION_MODE=0 to fall back to a one-shot
 // `claude -p` spawn per call.
 
-import { getSession } from "../claude-session";
+import { claudeSessions } from "../claude-session";
 import { runClaudePrompt } from "../claude-runner";
 import { buildOneShotPrompt } from "../translation-prompt";
 import type { TranslationProvider, TranslateOptions } from "./types";
@@ -14,7 +14,8 @@ export const claudeProvider: TranslationProvider = {
 
   async translate(content: string, opts: TranslateOptions): Promise<string> {
     if (SESSION_MODE) {
-      return getSession().sendUserMessage(content, opts.direction, opts.maxTurns ?? 0);
+      return claudeSessions.get(opts.sessionKey)
+        .sendUserMessage(content, opts.direction, opts.maxTurns ?? 0);
     }
     const prompt = buildOneShotPrompt(opts.direction, content);
     const result = await runClaudePrompt(prompt, { timeoutMs: opts.timeoutMs });
@@ -26,11 +27,11 @@ export const claudeProvider: TranslationProvider = {
     return process.env.YLCT_MODEL || "haiku";
   },
 
-  reset(): void {
-    if (SESSION_MODE) getSession().manualRestart();
+  reset(sessionKey?: string): void {
+    if (SESSION_MODE) claudeSessions.shutdown(sessionKey);
   },
 
-  shutdown(): void {
-    if (SESSION_MODE) getSession().shutdown();
+  shutdown(sessionKey?: string): void {
+    if (SESSION_MODE) claudeSessions.shutdown(sessionKey);
   },
 };

@@ -6,10 +6,11 @@ import path from "node:path";
 import { SYSTEM_PROMPT, OUTPUT_SCHEMA, wrap, type Direction } from "./translation-prompt";
 import { createLogger, killTree, readJsonLines } from "./proc-util";
 import { envInt } from "./env";
+import { SessionRegistry } from "./session-registry";
 
 const DEFAULT_CMD: string = process.env.YLCT_CLAUDE_PATH || "claude";
 const DEFAULT_MODEL: string = process.env.YLCT_MODEL || "haiku";
-const IDLE_TIMEOUT_MS: number = envInt("YLCT_SESSION_IDLE_MS", 30 * 60_000);
+const IDLE_TIMEOUT_MS: number = envInt("YLCT_SESSION_IDLE_MS", 5 * 60_000);
 const REQUEST_TIMEOUT_MS: number = envInt("YLCT_REQUEST_TIMEOUT_MS", 60_000);
 
 const log = createLogger("[ylct-session]");
@@ -36,6 +37,13 @@ export class ClaudeSession {
   private busy: QueueItem | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private turnCount = 0;
+  // Called once when the session is fully torn down (idle/manual/host exit), so
+  // the owning session map can drop the dead instance instead of handing it back.
+  private onDispose: (() => void) | null = null;
+
+  setDispose(fn: () => void): void {
+    this.onDispose = fn;
+  }
 
   spawnProc(): void {
     log("spawning claude session");
@@ -195,6 +203,11 @@ export class ClaudeSession {
       this.buffer = "";
       this.turnCount = 0;
     }
+    if (this.onDispose) {
+      const fn = this.onDispose;
+      this.onDispose = null;
+      fn();
+    }
   }
 
   sendUserMessage(content: string, direction: Direction = "ja_to_ko", maxTurns = 0): Promise<string> {
@@ -209,15 +222,8 @@ export class ClaudeSession {
       this.dequeue();
     });
   }
-
-  manualRestart(): void {
-    log("manual session restart requested");
-    this.shutdown();
-  }
 }
 
-let _instance: ClaudeSession | null = null;
-export function getSession(): ClaudeSession {
-  if (!_instance) _instance = new ClaudeSession();
-  return _instance;
-}
+// One persistent Claude session per key (the extension passes the Chrome tab id,
+// so each YouTube tab/channel gets an isolated conversation context).
+export const claudeSessions = new SessionRegistry<ClaudeSession>(() => new ClaudeSession());

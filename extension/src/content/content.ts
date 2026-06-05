@@ -724,5 +724,22 @@ declare global {
     clearParentInfoRetry();
   });
 
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      // (b) Tab hidden: cancel the pending auto-flush so a queued batch isn't
+      // translated in the background. New enqueues are already blocked while
+      // hidden (see handleNode), and we intentionally keep the local queue
+      // intact so injected placeholders stay consistent — it flushes naturally
+      // once the tab is visible again. Only content-local state is touched here,
+      // never the shared host session (which other visible tabs may be using).
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    } else if (enabled) {
+      // (a) Tab visible again: the per-tab host session may have idled out while
+      // hidden, so re-trigger warmup to avoid a cold start on the first message.
+      warmupSent = false;
+      maybeWarmup();
+    }
+  });
+
   init();
 })();

@@ -32,6 +32,9 @@ interface HostRequest {
   direction?: "ja_to_ko" | "ko_to_ja";
   maxTurns?: number;
   timeoutMs?: number;
+  // Per-tab session key (Chrome tab id as string) so the host isolates each
+  // tab's persistent translation session.
+  sessionKey?: string;
   withModel?: boolean;
 }
 
@@ -139,13 +142,13 @@ function parseClaudeJson(text: string | undefined): ParsedResults | null {
   return null;
 }
 
-async function translateBatch(items: BatchItem[], maxTurns = 0): Promise<BatchResponse> {
+async function translateBatch(items: BatchItem[], maxTurns = 0, sessionKey?: string): Promise<BatchResponse> {
   if (!Array.isArray(items) || items.length === 0) {
     return { ok: true, translations: [] };
   }
 
   const prompt = JSON.stringify({ items: items.map((it) => ({ id: it.id, ja: it.ja })) });
-  const reply = await sendToHost({ type: "translate", provider, prompt, maxTurns, timeoutMs: HOST_TIMEOUT_MS });
+  const reply = await sendToHost({ type: "translate", provider, prompt, maxTurns, timeoutMs: HOST_TIMEOUT_MS, sessionKey });
 
   if (!reply.ok) {
     return { ok: false, error: reply.error || "host error", stderr: reply.stderr };
@@ -166,12 +169,12 @@ async function translateBatch(items: BatchItem[], maxTurns = 0): Promise<BatchRe
   return { ok: true, translations, elapsedMs: reply.elapsedMs };
 }
 
-async function translateKoToJa(text: string): Promise<KoToJaResponse> {
+async function translateKoToJa(text: string, sessionKey?: string): Promise<KoToJaResponse> {
   const trimmed = text.trim();
   if (!trimmed) return { ok: false, error: "empty input" };
 
   const prompt = JSON.stringify({ items: [{ id: randomId("k-"), ko: trimmed }] });
-  const reply = await sendToHost({ type: "translate", provider, direction: "ko_to_ja", prompt, timeoutMs: HOST_TIMEOUT_MS });
+  const reply = await sendToHost({ type: "translate", provider, direction: "ko_to_ja", prompt, timeoutMs: HOST_TIMEOUT_MS, sessionKey });
   if (!reply.ok) return { ok: false, error: reply.error || "host error" };
 
   const result = parseClaudeJson(reply.text)?.results?.[0];
@@ -204,18 +207,19 @@ async function testTranslate(p: Provider, text: string): Promise<unknown> {
   };
 }
 
-async function resetSession(): Promise<unknown> {
-  const reply = await sendToHost({ type: "reset_session", provider, timeoutMs: 5_000 });
+async function resetSession(sessionKey?: string): Promise<unknown> {
+  const reply = await sendToHost({ type: "reset_session", provider, timeoutMs: 5_000, sessionKey });
   return { ok: !!reply.ok, elapsedMs: reply.elapsedMs };
 }
 
-async function warmup(): Promise<unknown> {
+async function warmup(sessionKey?: string): Promise<unknown> {
   const reply = await sendToHost({
     type: "translate",
     provider,
     direction: "ja_to_ko",
     prompt: JSON.stringify({ items: [{ id: "warmup", ja: "テスト" }] }),
     timeoutMs: HOST_TIMEOUT_MS,
+    sessionKey,
   });
   return { ok: !!reply.ok, elapsedMs: reply.elapsedMs };
 }
@@ -225,7 +229,9 @@ type InboundMessage =
   | { type: typeof MSG.TEST_TRANSLATE; provider: Provider; text: string }
   | { type: typeof MSG.TRANSLATE_BATCH; items: BatchItem[]; maxTurns?: number }
   | { type: typeof MSG.TRANSLATE_KO_TO_JA; text: string }
-  | { type: typeof MSG.RESET_SESSION }
+  // tabId is supplied by the popup (whose own sender.tab is the popup, not the
+  // target YouTube tab) so the host resets the right per-tab session.
+  | { type: typeof MSG.RESET_SESSION; tabId?: number }
   | { type: typeof MSG.WARMUP };
 
 function respond<T>(work: Promise<T>, sendResponse: (r: unknown) => void): true {
@@ -236,17 +242,31 @@ function respond<T>(work: Promise<T>, sendResponse: (r: unknown) => void): true 
 }
 
 chrome.runtime.onMessage.addListener(
-  (message: InboundMessage, _sender, sendResponse: (response: unknown) => void) => {
+  (message: InboundMessage, sender, sendResponse: (response: unknown) => void) => {
     if (!message || typeof message !== "object") return false;
+
+    // Content-script messages carry the originating tab; use its id as the
+    // per-tab session key. Falls back to "default" when absent (e.g. popup).
+    const senderKey = String(sender.tab?.id ?? "default");
 
     switch (message.type) {
       case MSG.PING_HOST:          return respond(pingHost(), sendResponse);
       case MSG.TEST_TRANSLATE:     return respond(testTranslate(message.provider, message.text), sendResponse);
-      case MSG.TRANSLATE_BATCH:    return respond(translateBatch(message.items || [], message.maxTurns || 0), sendResponse);
-      case MSG.TRANSLATE_KO_TO_JA: return respond(translateKoToJa(String(message.text || "")), sendResponse);
-      case MSG.RESET_SESSION:      return respond(resetSession(), sendResponse);
-      case MSG.WARMUP:             return respond(warmup(), sendResponse);
+      case MSG.TRANSLATE_BATCH:    return respond(translateBatch(message.items || [], message.maxTurns || 0, senderKey), sendResponse);
+      case MSG.TRANSLATE_KO_TO_JA: return respond(translateKoToJa(String(message.text || ""), senderKey), sendResponse);
+      case MSG.RESET_SESSION:      return respond(resetSession(message.tabId != null ? String(message.tabId) : senderKey), sendResponse);
+      case MSG.WARMUP:             return respond(warmup(senderKey), sendResponse);
       default:                     return false;
     }
   }
 );
+
+// When a tab closes, tear down its per-tab session in the host so the CLI
+// process doesn't linger until idle timeout. Only act when a host port is
+// already live — no port means no sessions, and we must not spawn the host
+// just to clean up (onRemoved fires for every tab, not only YouTube ones).
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!port) return;
+  sendToHost({ type: "close_session", provider, sessionKey: String(tabId) })
+    .catch(() => { /* host may be down; idle timeout is the backstop */ });
+});
