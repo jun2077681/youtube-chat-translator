@@ -66,17 +66,44 @@ const CHANNEL_NAME_SOURCES: ReadonlyArray<{ sel: string; attr: string | null }> 
   { sel: "#owner #channel-name yt-formatted-string", attr: null },
 ]);
 
-const HANDLE_EXCLUDE_HOSTS: ReadonlyArray<string> = Object.freeze([
-  "ytd-masthead",
-  "tp-yt-iron-dropdown",
-  "ytd-popup-container",
-  "ytd-account-section-list-renderer",
-  "ytd-mini-guide-renderer",
-  "ytd-guide-renderer",
+// The video owner row (channel link + name shown under the player). Handle
+// detection is scoped here so that /@mentions in the description, recommended
+// videos, or comments can never be mistaken for the current channel.
+const OWNER_SCOPE_SELECTORS: ReadonlyArray<string> = Object.freeze([
+  "ytd-video-owner-renderer",
+  "#owner",
 ]);
 
 function hasLiveChatFrame(doc: Document): boolean {
   return !!doc.querySelector("ytd-live-chat-frame");
+}
+
+function findOwnerScope(doc: Document): Element | null {
+  for (const sel of OWNER_SCOPE_SELECTORS) {
+    const el = doc.querySelector(sel);
+    if (el) return el;
+  }
+  return null;
+}
+
+function readHandleFromOwner(owner: Element): string | null {
+  const anchors = owner.querySelectorAll<HTMLAnchorElement>('a[href^="/@"]');
+  for (const a of Array.from(anchors)) {
+    const href = a.getAttribute("href") || "";
+    const m = href.match(/^\/(@[^/?#]+)/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function readChannelName(owner: Element, doc: Document): string | null {
+  for (const { sel, attr } of CHANNEL_NAME_SOURCES) {
+    const el = owner.querySelector(sel) || doc.querySelector(sel);
+    if (!el) continue;
+    const v = attr ? el.getAttribute(attr) : el.textContent;
+    if (v && v.trim()) return v.trim();
+  }
+  return null;
 }
 
 export function readChannelInfoFromDocument(doc: Document | null | undefined): ChannelInfo | null {
@@ -84,37 +111,13 @@ export function readChannelInfoFromDocument(doc: Document | null | undefined): C
     if (!doc) return null;
     if (!hasLiveChatFrame(doc)) return null;
 
-    const anchors = doc.querySelectorAll<HTMLAnchorElement>('a[href^="/@"]');
-    let handle: string | null = null;
-    for (const a of Array.from(anchors)) {
-      let inExcluded = false;
-      for (const host of HANDLE_EXCLUDE_HOSTS) {
-        if (a.closest && a.closest(host)) {
-          inExcluded = true;
-          break;
-        }
-      }
-      if (inExcluded) continue;
-      const href = a.getAttribute("href") || "";
-      const m = href.match(/^\/(@[^/?#]+)/);
-      if (m) {
-        handle = m[1];
-        break;
-      }
-    }
+    const owner = findOwnerScope(doc);
+    if (!owner) return null;
+
+    const handle = readHandleFromOwner(owner);
     if (!handle) return null;
 
-    let channelName: string | null = null;
-    for (const { sel, attr } of CHANNEL_NAME_SOURCES) {
-      const el = doc.querySelector(sel);
-      if (!el) continue;
-      const v = attr ? el.getAttribute(attr) : el.textContent;
-      if (v && v.trim()) {
-        channelName = v.trim();
-        break;
-      }
-    }
-    return { handle, channelName };
+    return { handle, channelName: readChannelName(owner, doc) };
   } catch {
     return null;
   }
