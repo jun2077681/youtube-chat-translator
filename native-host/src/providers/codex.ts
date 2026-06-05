@@ -8,8 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { buildOneShotPrompt } from "../translation-prompt";
 import { commandFailureError, runCommand } from "../proc-util";
-import { getCodexSession } from "../codex-session";
-import { getCodexModel, withModelErrorRetry } from "../codex-models";
+import { codexSessions } from "../codex-session";
+import { getCodexModel, resetCodexModelCache, withModelErrorRetry } from "../codex-models";
 import { CODEX_CMD, CODEX_EFFORT, CODEX_WORK_DIR, CODEX_REQUEST_TIMEOUT_MS } from "../codex-config";
 import type { TranslationProvider, TranslateOptions } from "./types";
 
@@ -65,7 +65,8 @@ export const codexProvider: TranslationProvider = {
 
   async translate(content: string, opts: TranslateOptions): Promise<string> {
     if (SESSION_MODE) {
-      return getCodexSession().sendPrompt(buildOneShotPrompt(opts.direction, content));
+      return codexSessions.get(opts.sessionKey)
+        .sendPrompt(buildOneShotPrompt(opts.direction, content));
     }
     return translateOneShot(content, opts);
   },
@@ -74,11 +75,15 @@ export const codexProvider: TranslationProvider = {
     return (await getCodexModel()) ?? "(codex CLI default)";
   },
 
-  reset(): void {
-    if (SESSION_MODE) getCodexSession().manualRestart();
+  reset(sessionKey?: string): void {
+    if (!SESSION_MODE) return;
+    codexSessions.shutdown(sessionKey);
+    // The detected model is process-global, so only a full reset (no key)
+    // re-detects it; a per-tab reset must not churn the shared model cache.
+    if (!sessionKey) resetCodexModelCache();
   },
 
-  shutdown(): void {
-    if (SESSION_MODE) getCodexSession().shutdown();
+  shutdown(sessionKey?: string): void {
+    if (SESSION_MODE) codexSessions.shutdown(sessionKey);
   },
 };

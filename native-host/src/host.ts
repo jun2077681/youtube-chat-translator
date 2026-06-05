@@ -18,6 +18,9 @@ interface InboundMessage {
   direction?: "ja_to_ko" | "ko_to_ja";
   maxTurns?: number;
   timeoutMs?: number;
+  // Per-tab session isolation key (Chrome tab id as a string). Scopes the
+  // persistent provider session so different tabs/channels don't share context.
+  sessionKey?: string;
   // Include the resolved model in the reply (debug test only); skipped on the
   // hot translate path since it's informational.
   withModel?: boolean;
@@ -50,7 +53,12 @@ async function handleMessage(msg: InboundMessage | null | undefined): Promise<Re
     if (type === "ping") return ok({ text: "pong" });
 
     if (type === "reset_session") {
-      resolveProvider(msg!.provider).reset();
+      resolveProvider(msg!.provider).reset(msg!.sessionKey);
+      return ok();
+    }
+
+    if (type === "close_session") {
+      resolveProvider(msg!.provider).shutdown(msg!.sessionKey);
       return ok();
     }
 
@@ -62,7 +70,7 @@ async function handleMessage(msg: InboundMessage | null | undefined): Promise<Re
       const direction = toDirection(msg!.direction);
       const maxTurns = typeof msg!.maxTurns === "number" ? msg!.maxTurns : 0;
       try {
-        const text = await provider.translate(prompt, { direction, maxTurns, timeoutMs: msg!.timeoutMs });
+        const text = await provider.translate(prompt, { direction, maxTurns, timeoutMs: msg!.timeoutMs, sessionKey: msg!.sessionKey });
         let model: string | undefined;
         if (msg!.withModel) {
           try { model = await provider.currentModel(); } catch { /* informational only */ }

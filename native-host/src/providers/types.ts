@@ -19,6 +19,9 @@ export interface TranslateOptions {
   // Ignored by one-shot providers.
   maxTurns?: number;
   timeoutMs?: number;
+  // Isolates conversation context per caller (the extension passes the Chrome
+  // tab id). Stateful providers keep one session per key; stateless ones ignore it.
+  sessionKey?: string;
 }
 
 export interface TranslationProvider {
@@ -29,8 +32,10 @@ export interface TranslationProvider {
   translate(content: string, opts: TranslateOptions): Promise<string>;
   // The model this provider will use (resolved/auto-detected). For debug display.
   currentModel(): Promise<string>;
-  // Restart/clear any persistent state. No-op for stateless one-shot providers.
-  reset(): void;
-  // Release resources when the host exits.
-  shutdown(): void;
+  // Restart/clear persistent state. With a sessionKey, only that session is
+  // reset; without one, all sessions reset. No-op for stateless providers.
+  reset(sessionKey?: string): void;
+  // Release resources. With a sessionKey, only that session is torn down (e.g. a
+  // tab closed); without one, all sessions are released (host exit).
+  shutdown(sessionKey?: string): void;
 }

@@ -230,8 +230,12 @@ resetSessionBtn.addEventListener("click", async () => {
   resetSessionBtn.disabled = true;
   resetSessionBtn.textContent = "재시작 중...";
   try {
+    // Reset only the session belonging to the active tab. The popup's own
+    // sender.tab is the popup, so the background can't infer the target tab —
+    // pass its id explicitly.
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const reply = await new Promise<{ ok?: boolean; error?: string } | undefined>((resolve) => {
-      chrome.runtime.sendMessage({ type: MSG.RESET_SESSION }, (r) => {
+      chrome.runtime.sendMessage({ type: MSG.RESET_SESSION, tabId: tab?.id }, (r) => {
         if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
         else resolve(r);
       });
