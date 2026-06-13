@@ -34,6 +34,7 @@ declare global {
   const MIN_BATCH_WINDOW_MS = 5_000;
   const MAX_BATCH_WINDOW_MS = 60_000;
   const MAX_BATCH_SIZE = 30;
+  const BACKFILL_COUNT = 10;
   const CACHE_KEY = KEY.CACHE;
   const CACHE_MAX_ENTRIES = 2000;
   const CACHE_FLUSH_DEBOUNCE_MS = 5_000;
@@ -550,6 +551,24 @@ declare global {
   let currentList: HTMLElement | null = null;
   let messageObserver: MutationObserver | null = null;
 
+  // Translate the most recent messages already present in the list. Used both on
+  // first attach and when a tab becomes visible again. A node that already shows
+  // a translation is skipped so we never inject a duplicate placeholder; any
+  // other recent node has its stale ylctId cleared so handleNode reprocesses it
+  // (messages seen while the tab was hidden were marked but dropped before
+  // translation — see the document.hidden guard in handleNode).
+  function backfillRecent(list: HTMLElement): number {
+    const recent = Array.from(
+      list.querySelectorAll<HTMLElement>("yt-live-chat-text-message-renderer")
+    ).slice(-BACKFILL_COUNT);
+    for (const node of recent) {
+      if (node.querySelector(".ylct-translation")) continue;
+      delete node.dataset.ylctId;
+      handleNode(node);
+    }
+    return recent.length;
+  }
+
   function attachToList(list: HTMLElement): void {
     if (!list || list === currentList) return;
 
@@ -564,8 +583,7 @@ declare global {
     currentList = list;
     cachedScroller = null;
 
-    const existing = Array.from(list.querySelectorAll("yt-live-chat-text-message-renderer"));
-    existing.slice(-10).forEach((n) => handleNode(n));
+    const backfilled = backfillRecent(list);
 
     messageObserver = new MutationObserver((mutations) => {
       const scroller = getChatScroller();
@@ -582,7 +600,7 @@ declare global {
     });
     messageObserver.observe(list, { childList: true, subtree: false });
 
-    console.log(`[ylct] message observer attached (${existing.length} existing, ${Math.min(existing.length, 10)} backfilled)`);
+    console.log(`[ylct] message observer attached (${backfilled} backfilled)`);
   }
 
   let warmupSent = false;
@@ -738,6 +756,9 @@ declare global {
       // hidden, so re-trigger warmup to avoid a cold start on the first message.
       warmupSent = false;
       maybeWarmup();
+      // (c) Backfill the most recent messages just like on first attach, so the
+      // chat that scrolled past while the tab was hidden gets translated.
+      if (currentList) backfillRecent(currentList);
     }
   });
 
