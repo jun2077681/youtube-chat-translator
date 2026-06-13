@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Live Chat Translator",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Translates YouTube live-chat between Japanese and Korean via a CLI translation provider (Claude, Codex, or Gemini), selectable in the popup. Per-channel whitelist; no API key required.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk4Kxme6/ueXoQnPqMIYzxXhBqaCYyyBiUdyftCkmhKCozV8gTLX6uC1blVbWybcCd+LmsdTSIa4pVntPe9X+QBj1lWCa4NytupxWOhCNl2imJOgTMZHNQZd+O16fVuSOHIvL2BdeS2bJliWAuRwjNlJ0UOkv+5ZPC38LMMaVPXYtIVXg68VXIbOFNcf1Nss8rkYMrOYo2ytQ0yyLxjbx2M78P1hVRSXRAS6VGyH3uSrS7HcvNJFu0w4eL2U1JRYMybhuOBYzff+aLsddEuiUAoMdx0VSYjz65S0GP9m39JDrgD8MQ33yXKEjLCcswlTGfdD65eE2QPcouNeceeRTnQIDAQAB",
   "permissions": ["nativeMessaging", "storage", "activeTab", "scripting"],
