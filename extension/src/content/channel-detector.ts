@@ -2,7 +2,8 @@
 // Sole purpose: respond to popup's GET_CHANNEL_INFO query so the user can
 // add the current channel to the whitelist.
 
-import { MSG, readChannelInfoFromDocument } from "../shared/constants";
+import { MSG } from "../shared/constants";
+import { readChannelInfoFromDocument } from "../shared/channel";
 
 declare global {
   interface Window {

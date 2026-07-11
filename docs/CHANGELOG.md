@@ -4,6 +4,18 @@
 
 ---
 
+## 0.10.1 — 클린 아키텍처 리팩토링 (2026-06-13)
+
+확장 버전 0.10.1 (native-host 0.2.0 변경 없음). **동작 변경 없음** — 내부 구조만 책임 단위로 분리.
+
+### 변경 (extension)
+- **순수 도메인 분리**: `content.ts`의 분류/정규화 로직을 `domain/classify.ts`(classify/isNoise/pictogramRatio), `domain/normalize.ts`(normalize/collapseRepeats/cacheKey)로 추출 — DOM/chrome 무의존, 단위 테스트 가능
+- **채널 탐지 분리**: `readChannelInfoFromDocument` + DOM 헬퍼를 `shared/constants.ts`에서 `shared/channel.ts`로 이동
+- **content.ts 분해** (766줄 → 진입점 212줄): `translation-cache`(LRU+영속화) / `batch-queue`(분류·디덥·배칭·적용 파이프라인) / `chat-dom`(placeholder·스크롤핀) / `chat-observer`(MutationObserver·백필·워밍업) / `background-bridge`(메시지 프리미티브) / `stats`(카운터). 순환 방지를 위해 `isEnabled`/`getCurrentList`를 진입점에서 주입(DI)
+- **background.ts 분해** (272줄 → 라우터 87줄): `host-port`(Native Messaging 포트 전송) / `parse`(parseClaudeJson) / `translate`(번역 유스케이스). provider는 인자로 주입
+
+---
+
 ## M10 — 멀티 번역 제공자 (Claude / Codex / Gemini) (2026-06-02)
 
 확장 버전 0.10.0, native-host 0.2.0.
